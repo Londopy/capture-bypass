@@ -1,0 +1,18 @@
+[package]
+name = "injector_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "injector_core"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",                # required by CreateRemoteThread in windows 0.58
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+]

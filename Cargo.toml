@@ -1,0 +1,3 @@
+[workspace]
+members = ["core", "cli", "gui", "payload_dll", "payload_dll_persistent"]
+resolver = "2"

@@ -1,0 +1,19 @@
+[package]
+name = "payload_dll_persistent"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "payload_dll_persistent"
+crate-type = ["cdylib"]
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+]

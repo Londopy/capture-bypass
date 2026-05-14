@@ -1,0 +1,40 @@
+# ── Rust ──────────────────────────────────────────────────────────────────────
+/target/
+**/*.rs.bk
+Cargo.lock          # kept for binaries — remove this line if you want to track it
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.venv/
+venv/
+env/
+.env
+*.egg-info/
+dist/
+build/
+*.spec
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vcxproj.user
+
+# ── Compiled / built artefacts ────────────────────────────────────────────────
+*.dll
+*.exe
+*.pdb
+*.lib
+*.exp
