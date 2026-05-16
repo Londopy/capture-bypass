@@ -286,7 +286,7 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let process_name = get_process_name(pid).unwrap_or_else(|| "<unknown>".to_string());
 
     entries.push(WindowEntry {
-        hwnd: hwnd.0,
+        hwnd: hwnd.0 as isize,
         pid,
         process_name,
         title,
