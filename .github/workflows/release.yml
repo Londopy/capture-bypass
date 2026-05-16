@@ -1,0 +1,107 @@
+name: Release
+
+# Triggers whenever you push a version tag — e.g. git tag v1.2.3 && git push --tags
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Needed so the job can create a GitHub Release and upload assets
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Source ────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Rust toolchain (x64 + x86) ───────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc,i686-pc-windows-msvc
+
+      # ── 3. Cache compiled deps ───────────────────────────────────────────────
+      - name: Cache Cargo registry & build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # ── 4. Build x64 (GUI + CLI + both payload DLLs) ────────────────────────
+      - name: Build x64
+        run: |
+          cargo build --release `
+            -p payload_dll `
+            -p payload_dll_persistent `
+            -p cli `
+            -p gui
+
+      # ── 5. Build x86 (CLI + payload DLLs only — no GUI needed) ──────────────
+      - name: Build x86
+        run: |
+          cargo build --release --target i686-pc-windows-msvc `
+            -p payload_dll `
+            -p payload_dll_persistent `
+            -p cli
+
+      # ── 6. Package: standalone Rust GUI bundle ───────────────────────────────
+      #   Users just unzip and double-click capture_bypass.exe — no Python needed.
+      - name: Package GUI bundle
+        shell: pwsh
+        run: |
+          $out = "dist\gui"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+
+          Copy-Item "target\release\capture_bypass.exe"        "$out\"
+          Copy-Item "target\release\payload_dll.dll"           "$out\"
+          Copy-Item "target\release\payload_dll_persistent.dll" "$out\"
+
+          Compress-Archive -Path "$out\*" `
+            -DestinationPath "capture-bypass-gui-${{ github.ref_name }}-x64.zip"
+
+      # ── 7. Package: Python frontend bundle ───────────────────────────────────
+      #   Preserves the target/ folder layout that app.py expects at runtime.
+      - name: Package Python frontend bundle
+        shell: pwsh
+        run: |
+          $root = "dist\python-frontend"
+
+          # app entry-point
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          Copy-Item "frontend\app.py" "$root\"
+
+          # x64 binaries — app.py looks for these in target\release\
+          $r64 = "$root\target\release"
+          New-Item -ItemType Directory -Path $r64 -Force | Out-Null
+          Copy-Item "target\release\cli.exe"                   "$r64\"
+          Copy-Item "target\release\payload_dll.dll"           "$r64\"
+          Copy-Item "target\release\payload_dll_persistent.dll" "$r64\"
+
+          # x86 binaries — app.py picks these up automatically for 32-bit targets
+          $r86 = "$root\target\i686-pc-windows-msvc\release"
+          New-Item -ItemType Directory -Path $r86 -Force | Out-Null
+          Copy-Item "target\i686-pc-windows-msvc\release\cli.exe"                   "$r86\"
+          Copy-Item "target\i686-pc-windows-msvc\release\payload_dll.dll"           "$r86\"
+          Copy-Item "target\i686-pc-windows-msvc\release\payload_dll_persistent.dll" "$r86\"
+
+          Compress-Archive -Path "$root\*" `
+            -DestinationPath "capture-bypass-python-${{ github.ref_name }}.zip"
+
+      # ── 8. Create GitHub Release & attach both zips ──────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true   # auto-fills body from commit messages
+          files: |
+            capture-bypass-gui-${{ github.ref_name }}-x64.zip
+            capture-bypass-python-${{ github.ref_name }}.zip
