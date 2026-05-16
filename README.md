@@ -6,6 +6,19 @@ A Windows utility that removes `WDA_EXCLUDEFROMCAPTURE` display-affinity protect
 
 ---
 
+## Download
+
+Pre-built binaries are available on the [Releases](../../releases/latest) page — no Rust or build tools required.
+
+| Download | What's inside |
+|---|---|
+| `capture-bypass-gui-*.zip` | Standalone `capture_bypass.exe` + payload DLLs. Just unzip and run — no Python needed. |
+| `capture-bypass-python-*.zip` | `app.py` + all binaries pre-arranged in the folder layout the frontend expects. Run `python app.py` after installing the Python dependencies below. |
+
+> **Note:** Windows Defender or other AV software may flag the payload DLLs due to the DLL injection technique. This is a false positive — see [DISCLAIMER.md](DISCLAIMER.md).
+
+---
+
 ## How it works
 
 Windows exposes [`SetWindowDisplayAffinity`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity) which lets a process mark its own windows as protected from capture. Protected windows appear black/blank in screenshots and screen recordings.
