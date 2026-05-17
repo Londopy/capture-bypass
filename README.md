@@ -4,6 +4,12 @@ A Windows utility that removes `WDA_EXCLUDEFROMCAPTURE` display-affinity protect
 
 > **Legal notice:** Read [DISCLAIMER.md](DISCLAIMER.md) before use. Only use this tool on windows and processes you own or have explicit permission to capture.
 
+![Relese](https://img.shields.io/github/v/release/Londopy/capture-bypass) 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/Londopy/HideDesktopApps/blob/main/LICENSE)
+![Files](https://img.shields.io/github/directory-file-count/Londopy/capture-bypass) 
+![Issues](https://img.shields.io/github/issues/Londopy/capture-bypass) 
+![Size](https://img.shields.io/github/languages/code-size/Londopy/capture-bypass) 
+
 ---
 
 ## Download
