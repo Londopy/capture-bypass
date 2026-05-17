@@ -17,6 +17,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use winreg::{enums::*, RegKey};
 
 // Windows API
 use windows::Win32::{
@@ -292,6 +293,9 @@ struct App {
     status_color: Color32,
     status_time: Option<Instant>,
 
+    // Launch at Windows startup
+    startup_enabled: bool,
+
     // Tray (must stay alive for the duration of the app)
     _tray_icon: Option<tray_icon::TrayIcon>,
     tray_open_id: Option<tray_icon::menu::MenuId>,
@@ -343,6 +347,7 @@ impl App {
             status_msg: String::from("Ready."),
             status_color: Color32::GRAY,
             status_time: None,
+            startup_enabled: read_startup_reg(),
             _tray_icon: tray_icon,
             tray_open_id,
             tray_quit_id,
@@ -361,6 +366,12 @@ impl App {
             "payload_dll.dll"
         };
         if is_32bit {
+            // Prefer {exe_dir}/x86/ — used by the installer and the GUI zip bundle.
+            let installed = self.exe_dir.join("x86").join(name);
+            if installed.exists() {
+                return installed;
+            }
+            // Fall back to the Cargo build-output layout for local development.
             self.exe_dir
                 .join("..")
                 .join("i686-pc-windows-msvc")
@@ -602,6 +613,7 @@ impl eframe::App for App {
         let mut do_strip_all = false;
         let mut toggle_mode = false;
         let mut toggle_auto = false;
+        let mut toggle_startup = false;
         let mut toggle_help = false;
         let mut manual_refresh = false;
 
@@ -675,6 +687,25 @@ impl eframe::App for App {
                 if ui.add(auto_btn).clicked() {
                     toggle_auto = true;
                 }
+
+                ui.add_space(12.0);
+
+                let startup_label = if self.startup_enabled {
+                    "🚀 Start with Windows ON"
+                } else {
+                    "🚀 Start with Windows"
+                };
+                let startup_btn = egui::Button::new(startup_label)
+                    .fill(if self.startup_enabled {
+                        Color32::from_rgb(60, 100, 30)
+                    } else {
+                        Color32::from_rgb(50, 50, 50)
+                    });
+                let startup_resp = ui.add(startup_btn)
+                    .on_hover_text("Adds this app to HKCU\\Run so it launches on login.\nWindows will show a UAC prompt each time because the app requires Administrator rights.");
+                if startup_resp.clicked() {
+                    toggle_startup = true;
+                }
             });
             ui.add_space(4.0);
         });
@@ -696,6 +727,19 @@ impl eframe::App for App {
             } else {
                 self.stop_auto_inject();
                 self.set_status_neutral("Auto-inject disabled.");
+            }
+        }
+        if toggle_startup {
+            let desired = !self.startup_enabled;
+            if write_startup_reg(desired) {
+                self.startup_enabled = desired;
+                if desired {
+                    self.set_status("🚀 Added to Windows startup.", true);
+                } else {
+                    self.set_status_neutral("Removed from Windows startup.");
+                }
+            } else {
+                self.set_status("✗ Could not write startup registry key.", false);
             }
         }
         if manual_refresh {
@@ -1081,6 +1125,42 @@ fn truncate(s: &str, max_chars: usize) -> String {
         format!("{}…", chars[..max_chars].iter().collect::<String>())
     } else {
         s.to_string()
+    }
+}
+
+// ── Windows startup registry helpers ─────────────────────────────────────────
+
+const STARTUP_RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+const STARTUP_VALUE_NAME: &str = "capture-bypass";
+
+/// Returns true if the startup registry entry currently exists.
+fn read_startup_reg() -> bool {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(run) = hkcu.open_subkey(STARTUP_RUN_KEY) {
+        run.get_value::<String, _>(STARTUP_VALUE_NAME).is_ok()
+    } else {
+        false
+    }
+}
+
+/// Writes (enable=true) or deletes (enable=false) the startup entry.
+/// Returns true on success.
+fn write_startup_reg(enable: bool) -> bool {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(run) = hkcu.open_subkey_with_flags(STARTUP_RUN_KEY, KEY_WRITE) else {
+        return false;
+    };
+    if enable {
+        // Quote the path in case it contains spaces (e.g. Program Files)
+        let exe = std::env::current_exe().unwrap_or_default();
+        let value = format!("\"{}\"", exe.display());
+        run.set_value(STARTUP_VALUE_NAME, &value).is_ok()
+    } else {
+        match run.delete_value(STARTUP_VALUE_NAME) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true, // already gone
+            Err(_) => false,
+        }
     }
 }
 

@@ -57,16 +57,21 @@ jobs:
 
       # ── 6. Package: standalone Rust GUI bundle ───────────────────────────────
       #   Users just unzip and double-click capture_bypass_gui.exe — no Python needed.
+      #   x86 payload DLLs land in x86\ so the GUI finds them automatically.
       - name: Package GUI bundle
         shell: pwsh
         run: |
           $out = "dist\gui"
-          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          New-Item -ItemType Directory -Path $out       -Force | Out-Null
+          New-Item -ItemType Directory -Path "$out\x86" -Force | Out-Null
 
-          Copy-Item "target\release\capture_bypass_gui.exe"    "$out\"
-          Copy-Item "target\release\stress_tester.exe"         "$out\"
-          Copy-Item "target\release\payload_dll.dll"           "$out\"
+          Copy-Item "target\release\capture_bypass_gui.exe"     "$out\"
+          Copy-Item "target\release\stress_tester.exe"          "$out\"
+          Copy-Item "target\release\payload_dll.dll"            "$out\"
           Copy-Item "target\release\payload_dll_persistent.dll" "$out\"
+
+          Copy-Item "target\i686-pc-windows-msvc\release\payload_dll.dll"             "$out\x86\"
+          Copy-Item "target\i686-pc-windows-msvc\release\payload_dll_persistent.dll"  "$out\x86\"
 
           Compress-Archive -Path "$out\*" `
             -DestinationPath "capture-bypass-gui-${{ github.ref_name }}-x64.zip"
@@ -99,7 +104,19 @@ jobs:
           Compress-Archive -Path "$root\*" `
             -DestinationPath "capture-bypass-python-${{ github.ref_name }}.zip"
 
-      # ── 8. Create GitHub Release & attach both zips ──────────────────────────
+      # ── 8. Build Windows installer with Inno Setup ──────────────────────────
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion=$version `
+            installer\capture-bypass.iss
+
+      # ── 9. Create GitHub Release & attach all assets ─────────────────────────
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -107,3 +124,4 @@ jobs:
           files: |
             capture-bypass-gui-${{ github.ref_name }}-x64.zip
             capture-bypass-python-${{ github.ref_name }}.zip
+            dist/capture-bypass-setup-*-x64.exe

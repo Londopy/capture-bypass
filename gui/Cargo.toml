@@ -12,6 +12,7 @@ eframe        = { version = "0.31", default-features = true }
 egui_extras   = { version = "0.31" }
 injector_core = { path = "../core" }
 tray-icon     = { version = "0.19", features = ["common-controls-v6"] }
+winreg        = "0.52"
 
 [dependencies.windows]
 version = "0.58"
