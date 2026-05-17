@@ -985,9 +985,8 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
 
     let process_name = get_process_name(pid).unwrap_or_else(|| "<unknown>".into());
 
-    let mut aff_val = WINDOW_DISPLAY_AFFINITY(0);
-    let _ = GetWindowDisplayAffinity(hwnd, &mut aff_val);
-    let affinity = aff_val.0;
+    let mut affinity: u32 = 0;
+    let _ = GetWindowDisplayAffinity(hwnd, &mut affinity);
     let is_protected = affinity == WDA_EXCLUDEFROMCAPTURE || affinity == WDA_MONITOR;
     let is_32bit = is_process_32bit(pid);
 

@@ -63,9 +63,9 @@ unsafe fn set_affinity(hwnd: HWND, value: u32) -> bool {
 }
 
 unsafe fn get_affinity(hwnd: HWND) -> u32 {
-    let mut aff = WINDOW_DISPLAY_AFFINITY(0);
+    let mut aff: u32 = 0;
     if GetWindowDisplayAffinity(hwnd, &mut aff).is_ok() {
-        aff.0
+        aff
     } else {
         AFF_UNKNOWN
     }
