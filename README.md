@@ -14,12 +14,15 @@ A Windows utility that removes `WDA_EXCLUDEFROMCAPTURE` display-affinity protect
 
 ## Download
 
-Pre-built binaries are available on the [Releases](../../releases/latest) page — no Rust or build tools required.
+Pre-built releases are on the [Releases](../../releases/latest) page — no Rust or build tools required.
 
-| Download | What's inside |
-|---|---|
-| `capture-bypass-python-*.zip` | The Python frontend (`app.py`) + all binaries pre-arranged. Install Python deps below, then run `python app.py`. |
-| `capture-bypass-gui-*.zip` | Standalone `capture_bypass_gui.exe` — no Python needed, same feature set as the Python frontend. |
+| Download | What's inside | Best for |
+|---|---|---|
+| `capture-bypass-setup-*.exe` | Windows installer with prompts for shortcuts, startup, and install path | Most users |
+| `capture-bypass-gui-*.zip` | Portable zip — `capture_bypass_gui.exe` + DLLs, just unzip and run | No-install preference |
+| `capture-bypass-python-*.zip` | `app.py` + all binaries pre-arranged | Python frontend users |
+
+The installer lets you optionally add a desktop shortcut, Start Menu entry, and a **Launch at Windows startup** entry (UAC prompt will appear at each login since the app requires Administrator rights).
 
 > **Note:** Windows Defender or other AV software may flag the payload DLLs due to the DLL injection technique. This is a false positive — see [DISCLAIMER.md](DISCLAIMER.md).
 
@@ -41,13 +44,15 @@ Because the API only allows a process to modify *its own* windows, bypassing it 
 ## Project structure
 
 ```
-windows_capture_bypass/
+capture-bypass/
 ├── core/                       Shared Rust library — inject_dll()
 ├── cli/                        Rust CLI binary — called by the Python frontend
 ├── gui/                        Rust/egui GUI frontend (feature-parity with app.py)
 ├── payload_dll/                One-shot payload DLL (strips once and exits)
 ├── payload_dll_persistent/     Persistent payload DLL (loops every 500 ms)
 ├── stress_tester/              Rust stress-test window (port of test_protection.py)
+├── installer/
+│   └── capture-bypass.iss      Inno Setup installer script
 ├── frontend/
 │   └── app.py                  Python/customtkinter GUI frontend
 └── test_protection.py          Python stress-test window (original)
@@ -74,13 +79,13 @@ windows_capture_bypass/
 
 ```powershell
 # Clone the repo
-git clone https://github.com/Londopy/windows_capture_bypass.git
-cd windows_capture_bypass
+git clone https://github.com/Londopy/capture-bypass.git
+cd capture-bypass
 
-# Build all Rust crates for 64-bit
-cargo build --release -p payload_dll -p payload_dll_persistent -p cli
+# Build all Rust crates for 64-bit (GUI, CLI, stress tester, and both payload DLLs)
+cargo build --release -p payload_dll -p payload_dll_persistent -p cli -p gui -p stress_tester
 
-# Install Python dependencies
+# Install Python dependencies (only needed for the Python frontend)
 pip install customtkinter pystray pillow
 ```
 
@@ -119,7 +124,8 @@ target\release\capture_bypass_gui.exe
 4. Click **Strip Protection** on any row, or **⚡ Strip All Protected** to batch-clear everything at once.
 5. Toggle **Mode** between *One-shot* (strips once) and *Persistent* (re-strips every 500 ms — for apps that fight back).
 6. Enable **🤖 Auto-inject** to have the app silently strip any newly protected window in the background; close to tray so it keeps running.
-7. Click **📖 Help** in the header to open the built-in wiki — covers injection modes, browser handling, 32-bit support, troubleshooting, and more.
+7. Enable **🚀 Start with Windows** to add a startup registry entry so the app launches automatically at login.
+8. Click **📖 Help** in the header to open the built-in wiki — covers injection modes, browser handling, 32-bit support, troubleshooting, and more.
 
 The `cli.exe` and `payload_dll*.dll` binaries must be present in `target/release/` (and optionally `target/i686-pc-windows-msvc/release/`) relative to the repo root.
 
@@ -171,7 +177,7 @@ Pick whichever suits your workflow.
 | Native GUI | Rust / egui | `target/release/capture_bypass_gui.exe` | No dependencies, single .exe |
 | Python GUI | Python / customtkinter | `python frontend/app.py` | Requires Python 3.10+ and pip deps |
 
-Both frontends have feature-parity: window table with live protection badges, filter bar, one-shot / persistent mode toggle, batch strip, auto-inject, system tray, and built-in help.
+Both frontends have feature-parity: window table with live protection badges, filter bar, one-shot / persistent mode toggle, batch strip, auto-inject, system tray, launch-at-startup toggle, and built-in help.
 
 ### Build the Rust GUI
 

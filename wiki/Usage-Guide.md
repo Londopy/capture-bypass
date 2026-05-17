@@ -64,6 +64,18 @@ Toggles a background thread that watches for newly protected windows and injects
 
 ---
 
+## 🚀 Start with Windows
+
+Adds (or removes) a Windows startup entry so capture-bypass launches automatically at every login.
+
+Clicking the button writes `capture-bypass` into `HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`. Clicking it again removes the entry. The button reflects the real registry state on every launch.
+
+**UAC note:** because the app requires Administrator rights, Windows will show a UAC elevation prompt each time it auto-launches at startup. This is unavoidable — simply click **Yes** to allow it. The option can also be enabled during installer setup.
+
+See [System Tray & Auto-inject](System-Tray-and-Auto-Inject) for more details.
+
+---
+
 ## Status bar
 
 The bottom bar shows the result of the last action with a timestamp:
@@ -84,4 +96,4 @@ The right side shows a live count: `N windows • N protected • N 32-bit`.
 4. Click **Strip Protection** on that row. The badge should flip to 🟢 **OK** within one 500 ms cycle.
 5. Start your screen capture in OBS — the window is now visible.
 
-If the target re-applies protection after a few seconds, switch to **🔁 Persistent** mode and inject again. If you want completely hands-free operation, enable **🤖 Auto-inject** and minimize to tray.
+If the target re-applies protection after a few seconds, switch to **🔁 Persistent** mode and inject again. If you want completely hands-free operation, enable **🤖 Auto-inject** and minimize to tray. Enable **🚀 Start with Windows** so the app is ready the next time you boot.
