@@ -32,16 +32,18 @@ use windows::Win32::{
     Foundation::{BOOL, HWND, LPARAM, TRUE},
     UI::WindowsAndMessaging::{
         EnumWindows, GetWindowDisplayAffinity, GetWindowTextW, GetWindowThreadProcessId,
-        IsWindowVisible, SetWindowDisplayAffinity,
+        IsWindowVisible, SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY,
     },
 };
 
 /// HWND is a raw pointer (*mut c_void) and therefore not Send by default.
-/// We wrap it in a newtype so we can move it into background threads.
-/// SAFETY: We only use the HWND to call Win32 APIs on our own window, which
-/// is valid from any thread on Windows.
+/// We store it as isize so the newtype itself is Send — Rust 2021 closure
+/// capture precision would otherwise capture the inner HWND field directly,
+/// bypassing the unsafe impl Send.
+/// SAFETY: We only use the value to reconstruct an HWND for Win32 calls on
+/// our own window, which is valid from any thread on Windows.
 #[derive(Clone, Copy)]
-struct SendHwnd(HWND);
+struct SendHwnd(isize);
 unsafe impl Send for SendHwnd {}
 
 // ── WDA constants ─────────────────────────────────────────────────────────────
@@ -57,13 +59,13 @@ const AFF_UNKNOWN: u32 = 0xFFFF_FFFF;
 // ── Windows helpers ───────────────────────────────────────────────────────────
 
 unsafe fn set_affinity(hwnd: HWND, value: u32) -> bool {
-    SetWindowDisplayAffinity(hwnd, value).is_ok()
+    SetWindowDisplayAffinity(hwnd, WINDOW_DISPLAY_AFFINITY(value)).is_ok()
 }
 
 unsafe fn get_affinity(hwnd: HWND) -> u32 {
-    let mut aff: u32 = 0;
+    let mut aff = WINDOW_DISPLAY_AFFINITY(0);
     if GetWindowDisplayAffinity(hwnd, &mut aff).is_ok() {
-        aff
+        aff.0
     } else {
         AFF_UNKNOWN
     }
@@ -155,7 +157,7 @@ impl App {
     fn initialize(&mut self) {
         let our_pid = std::process::id();
         if let Some(hwnd) = find_hwnd_for_pid(our_pid) {
-            let sh = SendHwnd(hwnd);
+            let sh = SendHwnd(hwnd.0 as isize);
             self.hwnd = Some(sh);
             unsafe { set_affinity(hwnd, WDA_EXCLUDEFROMCAPTURE); }
             self.current_aff.store(WDA_EXCLUDEFROMCAPTURE, Ordering::Relaxed);
@@ -169,7 +171,7 @@ impl App {
         let ctx = self.ctx.clone();
 
         std::thread::spawn(move || {
-            let hwnd = sh.0;
+            let hwnd = HWND(sh.0 as *mut _);
             let mut last_aff = WDA_EXCLUDEFROMCAPTURE;
             loop {
                 std::thread::sleep(Duration::from_millis(100));
@@ -200,7 +202,7 @@ impl App {
         let reapply_count = Arc::clone(&self.reapply_count);
 
         std::thread::spawn(move || {
-            let hwnd = sh.0;
+            let hwnd = HWND(sh.0 as *mut _);
             while running.load(Ordering::Relaxed) {
                 let ms = interval.load(Ordering::Relaxed);
                 std::thread::sleep(Duration::from_millis(ms as u64));
@@ -296,7 +298,7 @@ impl eframe::App for App {
                     // Sub-label: HWND + fight state
                     let hwnd_str = self
                         .hwnd
-                        .map(|sh| format!("HWND: 0x{:08X}", sh.0 .0 as usize))
+                        .map(|sh| format!("HWND: 0x{:08X}", sh.0 as usize))
                         .unwrap_or_else(|| "HWND: (discovering…)".into());
                     let fight_str = if self.fight_active {
                         format!("  |  Fight: ON @ {} ms", self.slider_value)
@@ -348,7 +350,7 @@ impl eframe::App for App {
 
                         if ui.add(apply_btn).clicked() {
                             if let Some(sh) = self.hwnd {
-                                unsafe { set_affinity(sh.0, WDA_EXCLUDEFROMCAPTURE); }
+                                unsafe { set_affinity(HWND(sh.0 as *mut _), WDA_EXCLUDEFROMCAPTURE); }
                             }
                         }
 
@@ -362,7 +364,7 @@ impl eframe::App for App {
 
                         if ui.add(remove_btn).clicked() {
                             if let Some(sh) = self.hwnd {
-                                unsafe { set_affinity(sh.0, WDA_NONE); }
+                                unsafe { set_affinity(HWND(sh.0 as *mut _), WDA_NONE); }
                             }
                         }
                     });

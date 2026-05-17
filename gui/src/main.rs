@@ -33,7 +33,7 @@ use windows::Win32::{
     },
     UI::WindowsAndMessaging::{
         EnumWindows, GetWindowDisplayAffinity, GetWindowTextW, GetWindowThreadProcessId,
-        IsWindowVisible,
+        IsWindowVisible, WINDOW_DISPLAY_AFFINITY,
     },
 };
 
@@ -560,7 +560,7 @@ impl eframe::App for App {
         }
 
         // ── Handle window close → minimize to tray ───────────────────────────
-        if ctx.input(|i| i.viewport().close_requested) {
+        if ctx.input(|i| i.viewport().close_requested()) {
             if !self.quit_requested {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -985,8 +985,9 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
 
     let process_name = get_process_name(pid).unwrap_or_else(|| "<unknown>".into());
 
-    let mut affinity: u32 = 0;
-    let _ = GetWindowDisplayAffinity(hwnd, &mut affinity);
+    let mut aff_val = WINDOW_DISPLAY_AFFINITY(0);
+    let _ = GetWindowDisplayAffinity(hwnd, &mut aff_val);
+    let affinity = aff_val.0;
     let is_protected = affinity == WDA_EXCLUDEFROMCAPTURE || affinity == WDA_MONITOR;
     let is_32bit = is_process_32bit(pid);
 
