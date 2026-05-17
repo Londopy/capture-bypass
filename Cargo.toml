@@ -1,3 +1,3 @@
 [workspace]
-members = ["core", "cli", "gui", "payload_dll", "payload_dll_persistent"]
+members = ["core", "cli", "gui", "payload_dll", "payload_dll_persistent", "stress_tester"]
 resolver = "2"

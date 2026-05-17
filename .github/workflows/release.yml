@@ -37,14 +37,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # ── 4. Build x64 (GUI + CLI + both payload DLLs) ────────────────────────
+      # ── 4. Build x64 (GUI + CLI + stress tester + both payload DLLs) ─────────
       - name: Build x64
         run: |
           cargo build --release `
             -p payload_dll `
             -p payload_dll_persistent `
             -p cli `
-            -p gui
+            -p gui `
+            -p stress_tester
 
       # ── 5. Build x86 (CLI + payload DLLs only — no GUI needed) ──────────────
       - name: Build x86
@@ -55,14 +56,15 @@ jobs:
             -p cli
 
       # ── 6. Package: standalone Rust GUI bundle ───────────────────────────────
-      #   Users just unzip and double-click capture_bypass.exe — no Python needed.
+      #   Users just unzip and double-click capture_bypass_gui.exe — no Python needed.
       - name: Package GUI bundle
         shell: pwsh
         run: |
           $out = "dist\gui"
           New-Item -ItemType Directory -Path $out -Force | Out-Null
 
-          Copy-Item "target\release\capture_bypass.exe"        "$out\"
+          Copy-Item "target\release\capture_bypass_gui.exe"    "$out\"
+          Copy-Item "target\release\stress_tester.exe"         "$out\"
           Copy-Item "target\release\payload_dll.dll"           "$out\"
           Copy-Item "target\release\payload_dll_persistent.dll" "$out\"
 

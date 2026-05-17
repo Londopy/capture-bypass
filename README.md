@@ -41,9 +41,10 @@ windows_capture_bypass/
 ├── gui/                        Rust/egui GUI frontend (feature-parity with app.py)
 ├── payload_dll/                One-shot payload DLL (strips once and exits)
 ├── payload_dll_persistent/     Persistent payload DLL (loops every 500 ms)
+├── stress_tester/              Rust stress-test window (port of test_protection.py)
 ├── frontend/
 │   └── app.py                  Python/customtkinter GUI frontend
-└── test_protection.py          Self-protecting stress-test window
+└── test_protection.py          Python stress-test window (original)
 ```
 
 ---

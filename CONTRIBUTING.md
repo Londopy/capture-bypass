@@ -12,10 +12,17 @@ Contributions are welcome. Please read this document before opening a pull reque
 ## Getting started
 
 ```powershell
-git clone https://github.com/Londopy/windows_capture_bypass.git
-cd windows_capture_bypass
-cargo build                 # debug build, all crates
-pip install customtkinter
+git clone https://github.com/Londopy/capture-bypass.git
+cd capture-bypass
+
+# Build all Rust crates (payloads + both GUIs + stress tester)
+cargo build --release -p payload_dll -p payload_dll_persistent -p gui -p stress_tester
+
+# Run the Rust GUI (no Python required)
+target\release\capture_bypass_gui.exe
+
+# Or install Python deps and run the Python frontend
+pip install customtkinter pystray pillow
 python frontend/app.py
 ```
 
@@ -25,10 +32,12 @@ python frontend/app.py
 |---|---|---|
 | `core/` | Rust | Shared injection library |
 | `cli/` | Rust | Subprocess-friendly CLI binary |
-| `gui/` | Rust | Standalone egui GUI |
-| `payload_dll/` | Rust | DLL injected into target processes |
+| `gui/` | Rust | Standalone egui GUI (feature-parity with Python frontend) |
+| `payload_dll/` | Rust | One-shot payload DLL |
+| `payload_dll_persistent/` | Rust | Persistent payload DLL (re-strips every 500 ms) |
+| `stress_tester/` | Rust | Self-protecting stress-test window |
 | `frontend/` | Python | customtkinter GUI frontend |
-| `test_protection.py` | Python | End-to-end test harness |
+| `test_protection.py` | Python | Python stress-test window (original) |
 
 ## Submitting changes
 
