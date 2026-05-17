@@ -38,8 +38,11 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 
-; Show the disclaimer as the license page
-LicenseFile=..\DISCLAIMER.md
+; License page shown during install
+LicenseFile=license.txt
+
+; Use the app's own icon for the installer exe
+SetupIconFile=..\target\release\capture_bypass_gui.exe
 
 ; Output
 OutputDir=..\dist

@@ -6,6 +6,7 @@
 fn main() {
     if std::env::var("CARGO_CFG_WINDOWS").is_ok() {
         let mut res = winres::WindowsResource::new();
+        res.set_icon("icon.ico");
         res.set_manifest(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
