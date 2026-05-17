@@ -41,8 +41,8 @@ AllowNoIcons=yes
 ; License page shown during install
 LicenseFile=license.txt
 
-; Use the app's own icon for the installer exe
-SetupIconFile=..\target\release\capture_bypass_gui.exe
+; Use the app icon for the installer exe
+SetupIconFile=..\gui\icon.ico
 
 ; Output
 OutputDir=..\dist
