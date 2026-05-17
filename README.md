@@ -12,8 +12,8 @@ Pre-built binaries are available on the [Releases](../../releases/latest) page �
 
 | Download | What's inside |
 |---|---|
-| `capture-bypass-gui-*.zip` | Standalone `capture_bypass.exe` + payload DLLs. Just unzip and run — no Python needed. |
-| `capture-bypass-python-*.zip` | `app.py` + all binaries pre-arranged in the folder layout the frontend expects. Run `python app.py` after installing the Python dependencies below. |
+| `capture-bypass-python-*.zip` | The Python frontend (`app.py`) + all binaries pre-arranged. Install Python deps below, then run `python app.py`. |
+| `capture-bypass-gui-*.zip` | Standalone `capture_bypass_gui.exe` — no Python needed, same feature set as the Python frontend. |
 
 > **Note:** Windows Defender or other AV software may flag the payload DLLs due to the DLL injection technique. This is a false positive — see [DISCLAIMER.md](DISCLAIMER.md).
 
@@ -38,7 +38,7 @@ Because the API only allows a process to modify *its own* windows, bypassing it 
 windows_capture_bypass/
 ├── core/                       Shared Rust library — inject_dll()
 ├── cli/                        Rust CLI binary — called by the Python frontend
-├── gui/                        Optional standalone Rust/egui GUI
+├── gui/                        Rust/egui GUI frontend (feature-parity with app.py)
 ├── payload_dll/                One-shot payload DLL (strips once and exits)
 ├── payload_dll_persistent/     Persistent payload DLL (loops every 500 ms)
 ├── frontend/
@@ -99,7 +99,11 @@ picks them up automatically — no configuration needed.
 ## Usage
 
 ```powershell
+# Python frontend
 python frontend/app.py
+
+# Rust GUI (no Python required)
+target\release\capture_bypass_gui.exe
 ```
 
 1. The app lists all visible, titled windows with their PID, process name, and live protection status.
@@ -138,15 +142,25 @@ every 100 ms to show the live state. Use it to:
 
 ---
 
-## Building the optional Rust GUI
+## Frontends
 
-If you prefer a standalone `.exe` with no Python dependency:
+capture-bypass ships two frontends. Both use the same injection core.
+Pick whichever suits your workflow.
+
+| Frontend | Language | How to run | Notes |
+|---|---|---|---|
+| Native GUI | Rust / egui | `target/release/capture_bypass_gui.exe` | No dependencies, single .exe |
+| Python GUI | Python / customtkinter | `python frontend/app.py` | Requires Python 3.10+ and pip deps |
+
+Both frontends have feature-parity: window table with live protection badges, filter bar, one-shot / persistent mode toggle, batch strip, auto-inject, system tray, and built-in help.
+
+### Build the Rust GUI
 
 ```powershell
 cargo build --release -p gui
-# Produces target/release/capture_bypass.exe
-# Copy the payload DLL next to it before running
-copy target\release\payload_dll.dll target\release\
+# Produces: target/release/capture_bypass_gui.exe
+# The payload DLLs must be in the same directory — build them first:
+cargo build --release -p payload_dll -p payload_dll_persistent
 ```
 
 ---

@@ -4,21 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "capture_bypass"
+name = "capture_bypass_gui"
 path = "src/main.rs"
 
 [dependencies]
-eframe = { version = "0.29", default-features = true }
+eframe        = { version = "0.31", default-features = true }
+egui_extras   = { version = "0.31", features = ["tables"] }
 injector_core = { path = "../core" }
+tray-icon     = { version = "0.19", features = ["common-controls"] }
 
 [dependencies.windows]
 version = "0.58"
 features = [
-    # Only the features gui/src/main.rs itself needs (window enumeration).
-    # Injection-specific features live in injector_core.
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Diagnostics_ToolHelp",
 ]
 
 [build-dependencies]
