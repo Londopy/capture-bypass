@@ -129,9 +129,21 @@ are covered.
 
 ## Testing
 
-Run the self-protecting stress-test window:
+Two stress-test windows are available — pick whichever suits your setup:
+
+| Option | How to run | Requires |
+|---|---|---|
+| Rust (recommended) | `target\release\stress_tester.exe` | Just build the crate |
+| Python (original) | `python test_protection.py` | Python 3.10+ |
+
+Both are functionally identical. The Rust binary is included in the `capture-bypass-gui-*.zip` release bundle, so you can test without any build step.
 
 ```powershell
+# Build and run the Rust stress tester
+cargo build --release -p stress_tester
+target\release\stress_tester.exe
+
+# Or run the Python original
 python test_protection.py
 ```
 
