@@ -34,7 +34,7 @@ use windows::Win32::{
     },
     UI::WindowsAndMessaging::{
         EnumWindows, GetWindowDisplayAffinity, GetWindowTextW, GetWindowThreadProcessId,
-        IsWindowVisible, WINDOW_DISPLAY_AFFINITY,
+        IsWindowVisible,
     },
 };
 
@@ -249,7 +249,6 @@ Make sure you built the x86 target:
 
 #[derive(Clone, Debug)]
 struct WindowEntry {
-    hwnd: isize,
     pid: u32,
     process_name: String,
     title: String,
@@ -1035,7 +1034,6 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let is_32bit = is_process_32bit(pid);
 
     state.entries.push(WindowEntry {
-        hwnd: hwnd.0 as isize,
         pid,
         process_name,
         title,
