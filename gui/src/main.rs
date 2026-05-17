@@ -8,7 +8,7 @@
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -295,6 +295,12 @@ struct App {
     // Launch at Windows startup
     startup_enabled: bool,
 
+    // One-shot re-injection tracking:
+    // PIDs that were manually stripped in one-shot mode; monitored for re-protection.
+    one_shot_stripped: HashMap<u32, String>,
+    // PIDs that re-applied protection and are waiting for user action.
+    reapply_alert: Vec<(u32, String)>,
+
     // Tray (must stay alive for the duration of the app)
     _tray_icon: Option<tray_icon::TrayIcon>,
     tray_open_id: Option<tray_icon::menu::MenuId>,
@@ -347,6 +353,8 @@ impl App {
             status_color: Color32::GRAY,
             status_time: None,
             startup_enabled: read_startup_reg(),
+            one_shot_stripped: HashMap::new(),
+            reapply_alert: Vec::new(),
             _tray_icon: tray_icon,
             tray_open_id,
             tray_quit_id,
@@ -580,6 +588,20 @@ impl eframe::App for App {
         // Snapshot current window list
         let all_windows: Vec<WindowEntry> = self.shared_windows.lock().unwrap().clone();
 
+        // ── Detect re-applied protection on one-shot stripped processes ─────────
+        // Only fires when NOT in persistent mode and NOT in auto-inject (which
+        // would handle it silently).  Moves matching PIDs to reapply_alert so the
+        // modal popup can prompt the user.
+        if !self.persistent_mode && !self.auto_inject_enabled && !self.one_shot_stripped.is_empty() {
+            for w in all_windows.iter().filter(|w| w.is_protected) {
+                if let Some(name) = self.one_shot_stripped.remove(&w.pid) {
+                    if !self.reapply_alert.iter().any(|(pid, _)| *pid == w.pid) {
+                        self.reapply_alert.push((w.pid, name));
+                    }
+                }
+            }
+        }
+
         // Apply filter
         let filter_lc = self.filter.to_lowercase();
         let filtered: Vec<&WindowEntry> = all_windows
@@ -615,6 +637,10 @@ impl eframe::App for App {
         let mut toggle_startup = false;
         let mut toggle_help = false;
         let mut manual_refresh = false;
+        let mut do_stress_test = false;
+        // Modal reapply actions — collected during modal rendering below.
+        let mut dismiss_reapply = false;
+        let mut switch_and_restrip = false;
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -624,6 +650,17 @@ impl eframe::App for App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("📖 Help").clicked() {
                         toggle_help = true;
+                    }
+                    ui.add_space(4.0);
+                    if ui
+                        .button("🔨 Stress Test")
+                        .on_hover_text(
+                            "Launch stress_tester.exe to simulate a protected window\n\
+                             and verify capture bypass is working correctly.",
+                        )
+                        .clicked()
+                    {
+                        do_stress_test = true;
                     }
                     ui.add_space(4.0);
 
@@ -717,6 +754,12 @@ impl eframe::App for App {
             self.persistent_mode = !self.persistent_mode;
             let mode = if self.persistent_mode { "Persistent" } else { "One-shot" };
             self.set_status_neutral(format!("Mode: {mode}"));
+            if self.persistent_mode {
+                // Persistent mode handles re-injection by itself — clear the
+                // one-shot tracking data and dismiss any pending alert.
+                self.one_shot_stripped.clear();
+                self.reapply_alert.clear();
+            }
         }
         if toggle_auto {
             self.auto_inject_enabled = !self.auto_inject_enabled;
@@ -745,8 +788,39 @@ impl eframe::App for App {
             // Background thread handles refresh; just show feedback
             self.set_status_neutral("Refreshing…");
         }
+        if do_stress_test {
+            let stress_path = self.exe_dir.join("stress_tester.exe");
+            if stress_path.exists() {
+                match std::process::Command::new(&stress_path).spawn() {
+                    Ok(_) => self.set_status_neutral("Launched stress_tester.exe."),
+                    Err(e) => self.set_status(format!("✗ Could not launch stress_tester: {e}"), false),
+                }
+            } else {
+                self.set_status(
+                    "✗ stress_tester.exe not found — build with: cargo build --release -p stress_tester",
+                    false,
+                );
+            }
+        }
         if do_strip_all {
             if all_windows.iter().any(|w| w.is_protected) {
+                // Track stripped PIDs for re-protection detection (one-shot mode only).
+                if !self.persistent_mode {
+                    let mut seen: HashSet<u32> = HashSet::new();
+                    for w in all_windows.iter().filter(|w| w.is_protected) {
+                        if seen.insert(w.pid) {
+                            self.one_shot_stripped.insert(w.pid, w.process_name.clone());
+                            if BROWSER_NAMES.iter().any(|b| w.process_name.eq_ignore_ascii_case(b)) {
+                                for child_pid in get_child_pids(w.pid) {
+                                    self.one_shot_stripped.insert(
+                                        child_pid,
+                                        format!("{} (child)", w.process_name),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 self.strip_all_protected(&all_windows);
             } else {
                 self.set_status_neutral("No protected windows found — hit Refresh first.");
@@ -879,7 +953,92 @@ impl eframe::App for App {
         });
 
         if let Some(target) = inject_target {
+            // Track in one-shot mode so re-protection can be detected.
+            if !self.persistent_mode {
+                self.one_shot_stripped.insert(target.pid, target.process_name.clone());
+                if BROWSER_NAMES.iter().any(|b| target.process_name.eq_ignore_ascii_case(b)) {
+                    for child_pid in get_child_pids(target.pid) {
+                        self.one_shot_stripped
+                            .insert(child_pid, format!("{} (child)", target.process_name));
+                    }
+                }
+            }
             self.strip_window(&target);
+        }
+
+        // ── Re-protection modal ──────────────────────────────────────────────
+        // Shown when a one-shot-stripped process has re-applied capture protection.
+        if !self.reapply_alert.is_empty() {
+            egui::Window::new("⚠️  Protection Re-applied")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label(
+                        "The following app(s) re-applied capture protection after being stripped:",
+                    );
+                    ui.add_space(4.0);
+                    for (pid, name) in &self.reapply_alert {
+                        ui.label(
+                            RichText::new(format!("  • {name}  (PID {pid})"))
+                                .color(Color32::from_rgb(255, 100, 100))
+                                .strong(),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.label(
+                        "⚡ One-shot mode injects once and exits — Windows caches the DLL path,\n\
+                         so re-injecting with the same file is a no-op.",
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "✅  Fix: switch to 🔁 Persistent mode.\n\
+                             The persistent DLL stays loaded and re-strips every 500 ms,\n\
+                             fighting back automatically whenever protection is re-applied.",
+                        )
+                        .strong(),
+                    );
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let btn = egui::Button::new("🔁  Switch to Persistent & Re-strip")
+                            .fill(Color32::from_rgb(30, 100, 50));
+                        if ui.add(btn).clicked() {
+                            switch_and_restrip = true;
+                        }
+                        ui.add_space(8.0);
+                        if ui.button("Dismiss").clicked() {
+                            dismiss_reapply = true;
+                        }
+                    });
+                });
+        }
+
+        // ── Apply modal actions ──────────────────────────────────────────────
+        if dismiss_reapply {
+            self.reapply_alert.clear();
+        }
+        if switch_and_restrip {
+            let alerted = std::mem::take(&mut self.reapply_alert);
+            self.persistent_mode = true;
+            self.one_shot_stripped.clear();
+            for (pid, name) in &alerted {
+                let is_32bit = all_windows
+                    .iter()
+                    .find(|w| w.pid == *pid)
+                    .map(|w| w.is_32bit)
+                    .unwrap_or(false);
+                self.inject_pid_async(*pid, name.clone(), is_32bit);
+            }
+            self.set_status(
+                format!(
+                    "🔁 Switched to Persistent — re-stripping {} process(es).",
+                    alerted.len()
+                ),
+                true,
+            );
         }
     }
 }

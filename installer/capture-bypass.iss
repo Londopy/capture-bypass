@@ -85,6 +85,12 @@ Name: "startup"; \
   GroupDescription: "Startup:"; \
   Flags: unchecked
 
+; Stress-tester desktop shortcut — unchecked by default (power-user tool)
+Name: "stressdesktopicon"; \
+  Description: "Create a desktop shortcut for the &Stress Tester utility"; \
+  GroupDescription: "Additional shortcuts:"; \
+  Flags: unchecked
+
 ; ── [Files] ───────────────────────────────────────────────────────────────────
 
 [Files]
@@ -123,10 +129,15 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; \
   Filename: "{uninstallexe}"; \
   Tasks: startmenuicon
 
-; Desktop shortcut
+; Desktop shortcut (main app)
 Name: "{autodesktop}\{#MyAppName}"; \
   Filename: "{app}\{#MyAppExeName}"; \
   Tasks: desktopicon
+
+; Desktop shortcut (stress tester — optional, unchecked by default)
+Name: "{autodesktop}\{#MyAppName} Stress Tester"; \
+  Filename: "{app}\stress_tester.exe"; \
+  Tasks: stressdesktopicon
 
 ; ── [Registry] ────────────────────────────────────────────────────────────────
 
