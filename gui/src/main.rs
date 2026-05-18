@@ -447,7 +447,8 @@ struct App {
     _tray_icon: Option<tray_icon::TrayIcon>,
     tray_open_id: Option<tray_icon::menu::MenuId>,
     tray_quit_id: Option<tray_icon::menu::MenuId>,
-    quit_requested: bool,
+    // Set by the off-thread tray watcher when the user clicks Open.
+    tray_show: Arc<AtomicBool>,
 
     // Channel: background injection threads → UI
     inject_tx: Sender<InjResult>,
@@ -499,6 +500,35 @@ impl App {
         // Set up system tray
         let (tray_icon, tray_open_id, tray_quit_id) = build_tray();
 
+        // ── Tray event watcher thread ────────────────────────────────────────
+        // We cannot poll tray events inside update() because winit stops
+        // dispatching repaints to hidden viewports, so update() never runs
+        // while the window is in the tray.  A dedicated blocking thread solves
+        // this: it receives events regardless of window visibility.
+        // Quit  → exit(0) immediately (OS cleans up the tray icon on process death)
+        // Open  → set tray_show flag + request_repaint() so update() restores the window
+        let tray_show = Arc::new(AtomicBool::new(false));
+        {
+            let quit_id    = tray_quit_id.clone();
+            let open_id    = tray_open_id.clone();
+            let show_flag  = Arc::clone(&tray_show);
+            let repaint_ctx = cc.egui_ctx.clone();
+            std::thread::spawn(move || {
+                loop {
+                    if let Ok(event) = tray_icon::menu::MenuEvent::receiver().recv() {
+                        let is_quit = quit_id.as_ref().map(|id| id == &event.id).unwrap_or(false);
+                        let is_open = open_id.as_ref().map(|id| id == &event.id).unwrap_or(false);
+                        if is_quit {
+                            std::process::exit(0);
+                        } else if is_open {
+                            show_flag.store(true, Ordering::Relaxed);
+                            repaint_ctx.request_repaint();
+                        }
+                    }
+                }
+            });
+        }
+
         let mut app = App {
             shared_windows,
             exe_dir,
@@ -533,7 +563,7 @@ impl App {
             _tray_icon: tray_icon,
             tray_open_id,
             tray_quit_id,
-            quit_requested: false,
+            tray_show,
             inject_tx,
             inject_rx,
         };
@@ -800,29 +830,20 @@ impl eframe::App for App {
             }
         }
 
-        // ── Poll tray menu events ────────────────────────────────────────────
-        if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-            if Some(&event.id) == self.tray_open_id.as_ref() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            } else if Some(&event.id) == self.tray_quit_id.as_ref() {
-                // The main window may be hidden (Visible(false)) when Quit is
-                // clicked.  egui stops processing ViewportCommands on hidden
-                // viewports, so ViewportCommand::Close is never drained.
-                // Save config and exit the process directly — the OS cleans up
-                // the tray icon automatically when the process dies.
-                self.stop_auto_inject();
-                self.persist();
-                std::process::exit(0);
-            }
+        // ── Tray "Open" action ───────────────────────────────────────────────
+        // Quit is handled by the off-thread tray watcher (process::exit).
+        // Open sets this flag + requests a repaint so we catch it here.
+        if self.tray_show.load(Ordering::Relaxed) {
+            self.tray_show.store(false, Ordering::Relaxed);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
-        // ── Handle window close → minimize to tray ───────────────────────────
+        // ── Handle window close (X button) → minimize to tray ───────────────
+        // The only true exit path is Quit in the tray menu (handled off-thread).
         if ctx.input(|i| i.viewport().close_requested()) {
-            if !self.quit_requested {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
 
         // Snapshot current window list
