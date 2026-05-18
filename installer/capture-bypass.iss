@@ -52,6 +52,14 @@ OutputBaseFilename=capture-bypass-setup-{#MyAppVersion}-x64
 Compression=lzma2/ultra64
 SolidCompression=yes
 
+; Detect running instances and prompt the user to close them before
+; overwriting files.  Because the app runs elevated and the installer
+; does not, Inno Setup cannot forcibly terminate it — it will show a
+; "please close the application" dialog instead.
+CloseApplications=yes
+CloseApplicationsFilter=*.exe
+RestartApplications=no
+
 ; Appearance
 WizardStyle=modern
 
@@ -164,3 +172,42 @@ Root: HKCU; \
 Filename: "{app}\{#MyAppExeName}"; \
   Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; \
   Flags: nowait postinstall skipifsilent shellexec
+
+; ── [Code] ────────────────────────────────────────────────────────────────────
+
+[Code]
+{ Check whether capture_bypass_gui.exe is currently running.
+  Called by Inno Setup before the install begins (PrepareToInstall).
+  Because the app runs elevated and the installer does not, we cannot
+  terminate it programmatically — we block the install and tell the user
+  to quit from the system tray first. }
+function IsAppRunning(const ExeName: String): Boolean;
+var
+  WbemLocator  : Variant;
+  WbemService  : Variant;
+  WbemObjectSet: Variant;
+begin
+  Result := False;
+  try
+    WbemLocator   := CreateOleObject('WbemScripting.SWbemLocator');
+    WbemService   := WbemLocator.ConnectServer('', 'root\cimv2', '', '');
+    WbemObjectSet := WbemService.ExecQuery(
+      'SELECT Name FROM Win32_Process WHERE Name="' + ExeName + '"');
+    Result := (WbemObjectSet.Count > 0);
+  except
+    { WMI unavailable — fall through and allow install }
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if IsAppRunning('{#MyAppExeName}') then
+    Result :=
+      'capture-bypass is currently running.' + #13#10 +
+      #13#10 +
+      'Please quit it before upgrading:' + #13#10 +
+      '  1. Right-click the capture-bypass icon in the system tray.' + #13#10 +
+      '  2. Click Quit.' + #13#10 +
+      '  3. Run the installer again.';
+end;
