@@ -86,9 +86,12 @@ struct Config {
     sort_col: u8, // 0=pid,1=process,2=title,3=status
     #[serde(default)]
     sort_asc: bool,
+    #[serde(default = "default_minimize_to_tray")]
+    minimize_to_tray: bool,
 }
 
 fn default_sort_col() -> u8 { 0 }
+fn default_minimize_to_tray() -> bool { true }
 
 impl Default for Config {
     fn default() -> Self {
@@ -102,6 +105,7 @@ impl Default for Config {
             watch_names: Vec::new(),
             sort_col: 0,
             sort_asc: true,
+            minimize_to_tray: true,
         }
     }
 }
@@ -447,6 +451,9 @@ struct App {
     _tray_icon: Option<tray_icon::TrayIcon>,
     tray_open_id: Option<tray_icon::menu::MenuId>,
     tray_quit_id: Option<tray_icon::menu::MenuId>,
+    // When true, X hides to tray instead of closing the process.
+    minimize_to_tray: bool,
+
     // Set by the off-thread tray watcher when the user clicks Open.
     tray_show: Arc<AtomicBool>,
 
@@ -563,6 +570,7 @@ impl App {
             _tray_icon: tray_icon,
             tray_open_id,
             tray_quit_id,
+            minimize_to_tray: cfg.minimize_to_tray,
             tray_show,
             inject_tx,
             inject_rx,
@@ -710,6 +718,7 @@ impl App {
             watch_names: self.watch_names.clone(),
             sort_col: self.sort_col.to_u8(),
             sort_asc: self.sort_asc,
+            minimize_to_tray: self.minimize_to_tray,
         });
     }
 
@@ -839,11 +848,14 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
-        // ── Handle window close (X button) → minimize to tray ───────────────
-        // The only true exit path is Quit in the tray menu (handled off-thread).
+        // ── Handle window close (X button) ──────────────────────────────────
         if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            if self.minimize_to_tray {
+                // Hide to tray — the tray watcher thread handles true quit.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+            // else: let eframe handle the close normally → process exits.
         }
 
         // Snapshot current window list
@@ -913,18 +925,21 @@ impl eframe::App for App {
         render_help_window(ctx, &mut self.show_help, &mut self.help_section);
 
         // ── Settings window ──────────────────────────────────────────────────
-        let mut toggle_startup_from_settings  = false;
-        let mut toggle_toast_from_settings    = false;
-        let mut toggle_hotkey_from_settings   = false;
+        let mut toggle_startup_from_settings       = false;
+        let mut toggle_toast_from_settings         = false;
+        let mut toggle_hotkey_from_settings        = false;
+        let mut toggle_minimize_to_tray_from_settings = false;
         render_settings_window(
             ctx,
             &mut self.show_settings,
             self.startup_enabled,
             self.toast_enabled,
             self.hotkey_enabled,
+            self.minimize_to_tray,
             &mut toggle_startup_from_settings,
             &mut toggle_toast_from_settings,
             &mut toggle_hotkey_from_settings,
+            &mut toggle_minimize_to_tray_from_settings,
         );
 
         // ── Top bar ──────────────────────────────────────────────────────────
@@ -1166,6 +1181,16 @@ impl eframe::App for App {
                 unregister_hotkey(self.hotkey_id);
                 self.set_status_neutral("⌨ Hotkey unregistered.");
             }
+            self.persist();
+        }
+        if toggle_minimize_to_tray_from_settings {
+            self.minimize_to_tray = !self.minimize_to_tray;
+            let s = if self.minimize_to_tray {
+                "✕ closes to tray."
+            } else {
+                "✕ exits the app."
+            };
+            self.set_status_neutral(s);
             self.persist();
         }
         if add_watch {
@@ -1602,9 +1627,11 @@ fn render_settings_window(
     startup_enabled: bool,
     toast_enabled: bool,
     hotkey_enabled: bool,
+    minimize_to_tray: bool,
     toggle_startup: &mut bool,
     toggle_toast: &mut bool,
     toggle_hotkey: &mut bool,
+    toggle_minimize_to_tray: &mut bool,
 ) {
     if !*show {
         return;
@@ -1614,7 +1641,7 @@ fn render_settings_window(
         .open(show)
         .resizable(false)
         .collapsible(false)
-        .default_size([340.0, 260.0])
+        .default_size([340.0, 310.0])
         .show(ctx, |ui| {
             ui.add_space(4.0);
 
@@ -1713,6 +1740,37 @@ fn render_settings_window(
                         .color(Color32::from_rgb(130, 130, 200)),
                 );
             }
+            ui.add_space(12.0);
+
+            // ── Window ────────────────────────────────────────────────────────
+            ui.label(RichText::new("Window").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let tray_label = if minimize_to_tray {
+                    "🗕  Minimize to tray on close  (ON)"
+                } else {
+                    "🗕  Minimize to tray on close  (OFF)"
+                };
+                let btn = egui::Button::new(tray_label)
+                    .fill(if minimize_to_tray {
+                        Color32::from_rgb(40, 60, 80)
+                    } else {
+                        Color32::from_rgb(50, 50, 50)
+                    })
+                    .min_size([300.0, 28.0].into());
+                if ui
+                    .add(btn)
+                    .on_hover_text(
+                        "ON  — clicking ✕ hides the app to the system tray.\n\
+                         OFF — clicking ✕ exits the app completely.\n\
+                         The tray icon's Quit option always exits regardless.",
+                    )
+                    .clicked()
+                {
+                    *toggle_minimize_to_tray = true;
+                }
+            });
             ui.add_space(4.0);
         });
 }
