@@ -1,4 +1,4 @@
-//! capture_bypass CLI — called by the Python frontend via subprocess.
+//! capture_bypass CLI
 //!
 //! Usage:
 //!   cli.exe <pid> <dll_path>
@@ -9,6 +9,10 @@
 //!
 //! On success, prints one line to stdout:  OK pid=<pid>
 //! On failure, prints one line to stderr:  ERROR <message>
+//!
+//! Injection uses `inject_dll_stealth`: the DLL is first copied to a randomly
+//! named temp file so the module name visible to CreateToolhelp32Snapshot is
+//! an opaque string rather than the original DLL filename.
 
 use std::{path::PathBuf, process};
 
@@ -35,7 +39,7 @@ fn main() {
         process::exit(1);
     }
 
-    match injector_core::inject_dll(pid, &dll_path) {
+    match injector_core::inject_dll_stealth(pid, &dll_path) {
         Ok(()) => {
             println!("OK pid={pid}");
             process::exit(0);

@@ -21,6 +21,91 @@
 
 use std::{ffi::CString, path::Path};
 
+// ── Structured error type ─────────────────────────────────────────────────────
+
+/// Typed injection failure — lets callers match on root cause rather than
+/// parsing an error string.
+#[derive(Debug)]
+pub enum InjectError {
+    /// The DLL file was not found at the given path.
+    DllNotFound(std::path::PathBuf),
+    /// The DLL path is not valid UTF-8.
+    BadPath,
+    /// The DLL path contains an interior null byte.
+    NullByte,
+    /// `OpenProcess` failed — most likely insufficient privileges.
+    OpenProcess(windows::core::Error),
+    /// `VirtualAllocEx` returned null.
+    Alloc,
+    /// `WriteProcessMemory` failed.
+    WriteMemory(windows::core::Error),
+    /// `CreateRemoteThread` failed.
+    RemoteThread(windows::core::Error),
+    /// Copying to the stealth temp path failed.
+    StealthCopy(std::io::Error),
+    /// Any other Windows API error.
+    Other(windows::core::Error),
+}
+
+impl std::fmt::Display for InjectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InjectError::DllNotFound(p) =>
+                write!(f, "DLL not found: {}", p.display()),
+            InjectError::BadPath =>
+                write!(f, "DLL path is not valid UTF-8"),
+            InjectError::NullByte =>
+                write!(f, "DLL path contains an interior null byte"),
+            InjectError::OpenProcess(e) =>
+                write!(f, "OpenProcess failed (run as Administrator?): {}", e.message()),
+            InjectError::Alloc =>
+                write!(f, "VirtualAllocEx failed in the target process"),
+            InjectError::WriteMemory(e) =>
+                write!(f, "WriteProcessMemory failed: {}", e.message()),
+            InjectError::RemoteThread(e) =>
+                write!(f, "CreateRemoteThread failed: {}", e.message()),
+            InjectError::StealthCopy(e) =>
+                write!(f, "Stealth copy to temp failed: {e}"),
+            InjectError::Other(e) =>
+                write!(f, "{}", e.message()),
+        }
+    }
+}
+
+impl std::error::Error for InjectError {}
+
+/// Type alias for convenience.
+pub type InjectResult = Result<(), InjectError>;
+
+/// High-level entry point that returns a typed [`InjectError`] instead of a
+/// raw `windows::core::Error`.  Prefer this over [`inject_dll`] when you want
+/// to match on the failure reason.
+pub fn inject_checked(pid: u32, dll_path: &Path) -> InjectResult {
+    if !dll_path.exists() {
+        return Err(InjectError::DllNotFound(dll_path.to_path_buf()));
+    }
+    let tmp = make_stealth_copy(pid, dll_path)
+        .map_err(InjectError::StealthCopy)?;
+
+    let result = inject_dll_inner(pid, &tmp);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn make_stealth_copy(pid: u32, dll_path: &Path) -> Result<std::path::PathBuf, std::io::Error> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let tag = nanos ^ pid;
+    let tmp = std::env::temp_dir().join(format!("{tag:08x}.tmp"));
+    std::fs::copy(dll_path, &tmp)?;
+    Ok(tmp)
+}
+
 use windows::{
     core::{s, Error, Result},
     Win32::{
@@ -55,35 +140,17 @@ use windows::{
 /// The temp file is cleaned up on injection failure; on success it is left
 /// in `%TEMP%` and will be swept up by normal OS temp-file cleanup.
 pub fn inject_dll_stealth(pid: u32, dll_path: &Path) -> windows::core::Result<()> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let tmp_dir = std::env::temp_dir();
-
-    // Opaque name: nanosecond wall-clock XOR pid.
-    // Nanosecond precision + pid makes path collisions negligible.
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    let tag = nanos ^ pid;
-    let tmp_path = tmp_dir.join(format!("{tag:08x}.tmp"));
-
-    // ── 1. Copy the payload to the opaque temp path ───────────────────────────
-    std::fs::copy(dll_path, &tmp_path).map_err(|e| {
+    let tmp_path = make_stealth_copy(pid, dll_path).map_err(|e| {
         windows::core::Error::new(
             windows::Win32::Foundation::E_FAIL,
             format!("Stealth copy to temp failed: {e}"),
         )
     })?;
 
-    // ── 2. Inject the temp copy ───────────────────────────────────────────────
     let result = inject_dll(pid, &tmp_path);
-
-    // Clean up temp file on failure (success leaves it for OS sweeping).
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp_path);
     }
-
     result
 }
 
@@ -92,15 +159,24 @@ pub fn inject_dll_stealth(pid: u32, dll_path: &Path) -> windows::core::Result<()
 /// Returns `Ok(())` when the remote thread has run to completion (DllMain
 /// executed).  Returns a descriptive `Err` on any failure — the caller should
 /// surface `e.message()` to the user.
+///
+/// For richer error matching, use [`inject_checked`] instead.
 pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<()> {
+    inject_dll_inner(pid, dll_path).map_err(|e| {
+        Error::new(windows::Win32::Foundation::E_FAIL, e.to_string())
+    })
+}
+
+/// Core injection implementation that returns [`InjectError`].
+fn inject_dll_inner(pid: u32, dll_path: &Path) -> InjectResult {
     // LoadLibraryA is an ANSI API — build a null-terminated ANSI string.
     // If your DLL lives at a non-ASCII path, swap this for LoadLibraryW.
     let path_str = dll_path
         .to_str()
-        .ok_or_else(|| Error::new(windows::Win32::Foundation::E_INVALIDARG, "DLL path is not valid UTF-8"))?;
+        .ok_or(InjectError::BadPath)?;
 
     let path_cstr = CString::new(path_str)
-        .map_err(|_| Error::new(windows::Win32::Foundation::E_INVALIDARG, "DLL path contains an interior null byte"))?;
+        .map_err(|_| InjectError::NullByte)?;
 
     let path_bytes = path_cstr.as_bytes_with_nul();
 
@@ -114,15 +190,7 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<()> {
             false,
             pid,
         )
-        .map_err(|e| {
-            Error::new(
-                e.code(),
-                format!(
-                    "OpenProcess(pid={pid}) failed — is the tool running as Administrator? ({})",
-                    e.message()
-                ),
-            )
-        })?;
+        .map_err(InjectError::OpenProcess)?;
 
         // ── 2. Allocate memory in the target for the DLL path string ──────────
         let remote_buf = VirtualAllocEx(
@@ -135,10 +203,7 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<()> {
 
         if remote_buf.is_null() {
             let _ = CloseHandle(process);
-            return Err(Error::new(
-                windows::Win32::Foundation::E_OUTOFMEMORY,
-                "VirtualAllocEx failed in the target process",
-            ));
+            return Err(InjectError::Alloc);
         }
 
         // ── 3. Write the DLL path into the target ─────────────────────────────
@@ -151,20 +216,17 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<()> {
         ) {
             let _ = VirtualFreeEx(process, remote_buf, 0, MEM_RELEASE);
             let _ = CloseHandle(process);
-            return Err(Error::new(
-                e.code(),
-                format!("WriteProcessMemory failed: {}", e.message()),
-            ));
+            return Err(InjectError::WriteMemory(e));
         }
 
         // ── 4. Resolve LoadLibraryA — identical VA in every process ───────────
-        let kernel32 = GetModuleHandleA(s!("kernel32.dll"))?;
-        let load_library_raw = GetProcAddress(kernel32, s!("LoadLibraryA")).ok_or_else(|| {
-            Error::new(
+        let kernel32 = GetModuleHandleA(s!("kernel32.dll"))
+            .map_err(InjectError::Other)?;
+        let load_library_raw = GetProcAddress(kernel32, s!("LoadLibraryA"))
+            .ok_or_else(|| InjectError::Other(Error::new(
                 windows::Win32::Foundation::E_FAIL,
                 "GetProcAddress(LoadLibraryA) returned null",
-            )
-        })?;
+            )))?;
 
         // LoadLibraryA(LPCSTR) and LPTHREAD_START_ROUTINE(*mut c_void) are
         // ABI-compatible on x64 Windows (both pointer-sized, same calling conv).
@@ -187,10 +249,7 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<()> {
             Err(e) => {
                 let _ = VirtualFreeEx(process, remote_buf, 0, MEM_RELEASE);
                 let _ = CloseHandle(process);
-                return Err(Error::new(
-                    e.code(),
-                    format!("CreateRemoteThread failed: {}", e.message()),
-                ));
+                return Err(InjectError::RemoteThread(e));
             }
         };
 

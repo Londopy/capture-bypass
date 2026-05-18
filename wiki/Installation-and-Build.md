@@ -17,24 +17,13 @@ Run it and follow the prompts. You can choose:
 
 At the end, click **"Launch capture-bypass"** to start it immediately.
 
----
-
-## Option B — Download the portable zip
-
-If you prefer no installer, download the zip instead:
-
-| Bundle | Contents | Who it's for |
-|---|---|---|
-| `capture-bypass-gui-vX.Y.Z-x64.zip` | `capture_bypass_gui.exe`, `stress_tester.exe`, `payload_dll.dll`, `payload_dll_persistent.dll`, `x86\*.dll` | Anyone — no Python or Rust required |
-| `capture-bypass-python-vX.Y.Z.zip` | `app.py` + all binaries pre-arranged | Python users who prefer the Python frontend |
-
-Unzip anywhere, right-click `capture_bypass_gui.exe` → **Run as administrator**.
-
 > **Antivirus note:** Windows Defender or other AV software may flag the payload DLLs due to the DLL injection technique. This is a false positive — the DLL only calls `SetWindowDisplayAffinity`. See [DISCLAIMER.md](https://github.com/Londopy/capture-bypass/blob/main/DISCLAIMER.md).
 
 ---
 
 ## Option B — Build from source
+
+If you need a portable layout, want to target 32-bit processes, or just want to build it yourself:
 
 ### Requirements
 
@@ -43,8 +32,6 @@ Unzip anywhere, right-click `capture_bypass_gui.exe` → **Run as administrator*
 | Windows 10 build 19041+ | `WDA_EXCLUDEFROMCAPTURE` requires the 2004 update |
 | Administrator privileges | Required by `OpenProcess` on other processes |
 | [Rust + Cargo](https://rustup.rs) | Stable toolchain, `x86_64-pc-windows-msvc` target |
-| Python 3.10+ | Only needed for the Python frontend (`frontend/app.py`) |
-| [customtkinter](https://github.com/TomSchimansky/CustomTkinter) + pystray + Pillow | Python frontend deps only |
 
 ### x64 build (required)
 
@@ -52,32 +39,29 @@ Unzip anywhere, right-click `capture_bypass_gui.exe` → **Run as administrator*
 git clone https://github.com/Londopy/capture-bypass.git
 cd capture-bypass
 
-# Build everything
-cargo build --release -p payload_dll -p payload_dll_persistent -p gui -p stress_tester
+# Build all crates — GUI, CLI, stress tester, and both payload DLLs
+cargo build --release -p payload_dll -p payload_dll_persistent -p cli -p gui -p stress_tester
 
-# Rust GUI — no Python needed
+# Launch the GUI
 target\release\capture_bypass_gui.exe
-
-# Or install Python deps and use the Python frontend
-pip install customtkinter pystray pillow
-python frontend\app.py
 ```
 
 Binaries land in `target\release\`.
 
 ### x86 build (optional — for 32-bit targets)
 
-The app auto-detects 32-bit processes (shown with an orange **32** badge) and routes injection through the x86 payload DLLs when they are present. If you skip this step, 32-bit targets fail gracefully with a status-bar error.
+The app auto-detects 32-bit processes (shown with an orange **32** badge) and routes injection through the x86 payload DLLs when present. If you skip this step, 32-bit targets fail gracefully with a status-bar error.
 
 ```powershell
 rustup target add i686-pc-windows-msvc
 
 cargo build --release --target i686-pc-windows-msvc `
     -p payload_dll `
-    -p payload_dll_persistent
+    -p payload_dll_persistent `
+    -p cli
 ```
 
-The x86 binaries land in `target\i686-pc-windows-msvc\release\`. The app picks them up automatically — no configuration required.
+The x86 binaries land in `target\i686-pc-windows-msvc\release\`. Place them in an `x86\` subfolder next to the GUI exe and the app picks them up automatically — no configuration required.
 
 ---
 
@@ -86,9 +70,9 @@ The x86 binaries land in `target\i686-pc-windows-msvc\release\`. The app picks t
 ```
 target\
 ├── release\
-│   ├── capture_bypass_gui.exe       ← Rust GUI (run as Admin)
-│   ├── stress_tester.exe            ← Rust stress-test window
-│   ├── cli.exe                      ← CLI binary (used by Python frontend)
+│   ├── capture_bypass_gui.exe       ← GUI (run as Admin)
+│   ├── stress_tester.exe            ← Stress-test window
+│   ├── cli.exe                      ← CLI binary
 │   ├── payload_dll.dll              ← One-shot payload
 │   └── payload_dll_persistent.dll  ← Persistent payload
 └── i686-pc-windows-msvc\release\

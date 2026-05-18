@@ -55,27 +55,7 @@ jobs:
             -p payload_dll_persistent `
             -p cli
 
-      # ── 6. Package: standalone Rust GUI bundle ───────────────────────────────
-      #   x86 payload DLLs land in x86\ so the GUI finds them automatically.
-      - name: Package GUI bundle
-        shell: pwsh
-        run: |
-          $out = "dist\gui"
-          New-Item -ItemType Directory -Path $out       -Force | Out-Null
-          New-Item -ItemType Directory -Path "$out\x86" -Force | Out-Null
-
-          Copy-Item "target\release\capture_bypass_gui.exe"     "$out\"
-          Copy-Item "target\release\stress_tester.exe"          "$out\"
-          Copy-Item "target\release\payload_dll.dll"            "$out\"
-          Copy-Item "target\release\payload_dll_persistent.dll" "$out\"
-
-          Copy-Item "target\i686-pc-windows-msvc\release\payload_dll.dll"             "$out\x86\"
-          Copy-Item "target\i686-pc-windows-msvc\release\payload_dll_persistent.dll"  "$out\x86\"
-
-          Compress-Archive -Path "$out\*" `
-            -DestinationPath "capture-bypass-gui-${{ github.ref_name }}-x64.zip"
-
-      # ── 7. Build Windows installer with Inno Setup ──────────────────────────
+      # ── 6. Build Windows installer with Inno Setup ──────────────────────────
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
@@ -87,11 +67,10 @@ jobs:
             /DMyAppVersion=$version `
             installer\capture-bypass.iss
 
-      # ── 9. Create GitHub Release & attach all assets ─────────────────────────
+      # ── 7. Create GitHub Release & attach installer ──────────────────────────
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true   # auto-fills body from commit messages
           files: |
-            capture-bypass-gui-${{ github.ref_name }}-x64.zip
             dist/capture-bypass-setup-*-x64.exe

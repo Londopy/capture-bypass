@@ -14,14 +14,15 @@ A Windows utility that removes `WDA_EXCLUDEFROMCAPTURE` display-affinity protect
 
 ## Download
 
-Pre-built releases are on the [Releases](../../releases/latest) page — no Rust or build tools required.
+The pre-built release is on the [Releases](../../releases/latest) page — no Rust or build tools required.
 
-| Download | What's inside | Best for |
-|---|---|---|
-| `capture-bypass-setup-*.exe` | Windows installer with prompts for shortcuts, startup, and install path | Most users |
-| `capture-bypass-gui-*.zip` | Portable zip — `capture_bypass_gui.exe` + DLLs, just unzip and run | No-install preference |
+| Download | What's inside |
+|---|---|
+| `capture-bypass-setup-*.exe` | Windows installer — prompts for install path, shortcuts, and optional startup entry |
 
-The installer optionally adds a desktop shortcut, Start Menu entry, and a **Launch at Windows startup** entry (a UAC prompt will appear at each login since the app requires Administrator rights).
+The installer adds a desktop shortcut, Start Menu entry, and optionally a **Launch at Windows startup** entry (a UAC prompt will appear at each login since the app requires Administrator rights).
+
+Want a portable layout or a custom build? See the [Build](#build) section below.
 
 > **Note:** Windows Defender or other AV software may flag the payload DLLs due to the DLL injection technique. This is a false positive — see [DISCLAIMER.md](DISCLAIMER.md).
 
@@ -97,14 +98,21 @@ The x86 binaries land in `target/i686-pc-windows-msvc/release/`. The GUI picks t
 target\release\capture_bypass_gui.exe
 ```
 
-1. The app lists all visible, titled windows with their PID, process name, and live protection status (refreshed every 500 ms).
+1. The app lists all visible, titled windows with their PID, process icon, process name, and live protection status (refreshed every 500 ms). Click any column header to sort ▲/▼.
 2. Use the **Filter** bar to search by process name, window title, or PID.
 3. Tick **Protected only** to hide unprotected windows.
 4. Click **Strip Protection** on any row, or **⚡ Strip All Protected** to batch-clear everything at once.
-5. Toggle **Mode** between *One-shot* (strips once, fast) and *Persistent* (re-strips every 500 ms — for apps that fight back on a timer).
+5. Toggle **Mode** between *One-shot* (strips once, fast) and *Persistent* (re-strips every 500 ms — for apps that fight back on a timer). If a one-shot app re-applies protection, a popup automatically offers to switch to persistent mode and re-strip.
 6. Enable **🤖 Auto-inject** to silently strip any newly protected window in the background; close to tray so it keeps running.
 7. Enable **🚀 Start with Windows** to write a startup registry entry so the app launches automatically at login.
 8. Click **📖 Help** in the header to open the built-in documentation.
+9. Use the **Watch** bar to pin one or more process names — any time that process starts, capture protection is stripped automatically (independent of auto-inject).
+10. Click **⌨ Hotkey** to register **Ctrl+Shift+B** as a global "Strip All Protected" shortcut, usable even when the window is minimised to tray.
+11. Click **🔔 Toasts** to enable Windows desktop notifications whenever auto-inject silently strips a process.
+12. Click **📋 Log** to open the injection log panel — a timestamped, scrollable history of every strip attempt and its result.
+13. When a newer release is available, a **🆕 v{x.y.z} available** button appears in the header; click it to go directly to the releases page.
+
+All settings (mode, auto-inject, watch names, hotkey, toasts, sort column, log visibility) are saved automatically to `%APPDATA%\capture-bypass\config.toml` and restored on next launch.
 
 ### Browsers
 

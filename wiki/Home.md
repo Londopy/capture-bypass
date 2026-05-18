@@ -13,7 +13,7 @@
 | [Injection Modes](Injection-Modes) | One-shot vs Persistent — when to use each |
 | [Browser Injection](Browser-Injection) | Why browsers need multi-process injection and how it works |
 | [System Tray & Auto-inject](System-Tray-and-Auto-Inject) | Close-to-tray, auto-inject background thread |
-| [Testing](Testing) | Rust stress_tester, Python test_protection.py, fight mode |
+| [Testing](Testing) | stress_tester — fight mode, Scenario A (process scan), Scenario B (module ejection) |
 | [Troubleshooting](Troubleshooting) | DLLs not found, AV flags, injection fails, OBS still black |
 
 ---
@@ -21,11 +21,10 @@
 ## Quick start
 
 ```powershell
-# 1. Download the latest release zip and unzip it
-#    capture-bypass-gui-vX.Y.Z-x64.zip  →  capture_bypass_gui.exe + DLLs
+# 1. Download capture-bypass-setup-X.Y.Z-x64.exe from the Releases page
+#    and run the installer — no Rust or build tools required.
 
-# 2. Run as Administrator
-capture_bypass_gui.exe
+# 2. Launch from the desktop shortcut or Start Menu (runs as Administrator automatically).
 ```
 
 The app lists every visible window. Click **Strip Protection** on any protected row, or **⚡ Strip All Protected** to clear everything at once.

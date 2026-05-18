@@ -1,15 +1,15 @@
 //! capture-bypass GUI — Rust/egui frontend
 //!
-//! Feature-parity with frontend/app.py (Python/customtkinter).
 //! Requires Administrator privileges (enforced by embedded UAC manifest via build.rs).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_extras::{Column, TableBuilder};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
@@ -22,6 +22,9 @@ use winreg::{enums::*, RegKey};
 // Windows API
 use windows::Win32::{
     Foundation::{BOOL, HWND, LPARAM, TRUE},
+    Graphics::Gdi::{
+        GetDC, GetDIBits, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    },
     System::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -32,9 +35,14 @@ use windows::Win32::{
             PROCESS_QUERY_LIMITED_INFORMATION,
         },
     },
-    UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowDisplayAffinity, GetWindowTextW, GetWindowThreadProcessId,
-        IsWindowVisible,
+    UI::{
+        Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON},
+        WindowsAndMessaging::{
+            EnumWindows, GetIconInfo, GetWindowDisplayAffinity, GetWindowTextW,
+            GetWindowThreadProcessId, IsWindowVisible, PeekMessageW, RegisterHotKey,
+            UnregisterHotKey, HOT_KEY_MODIFIERS, ICONINFO, MOD_CONTROL, MOD_SHIFT, MSG,
+            PEEK_MESSAGE_REMOVE_TYPE, PM_REMOVE, WM_HOTKEY,
+        },
     },
 };
 
@@ -53,6 +61,77 @@ const BROWSER_NAMES: &[&str] = &[
     "vivaldi.exe",
     "thorium.exe",
 ];
+
+// ── Persistent config ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Config {
+    #[serde(default)]
+    persistent_mode: bool,
+    #[serde(default)]
+    auto_inject: bool,
+    #[serde(default)]
+    protected_only: bool,
+    #[serde(default)]
+    toast_enabled: bool,
+    #[serde(default)]
+    hotkey_enabled: bool,
+    #[serde(default)]
+    show_log: bool,
+    #[serde(default)]
+    watch_names: Vec<String>,
+    #[serde(default = "default_sort_col")]
+    sort_col: u8, // 0=pid,1=process,2=title,3=status
+    #[serde(default)]
+    sort_asc: bool,
+}
+
+fn default_sort_col() -> u8 { 0 }
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            persistent_mode: false,
+            auto_inject: false,
+            protected_only: false,
+            toast_enabled: false,
+            hotkey_enabled: false,
+            show_log: false,
+            watch_names: Vec::new(),
+            sort_col: 0,
+            sort_asc: true,
+        }
+    }
+}
+
+fn config_path() -> Option<PathBuf> {
+    dirs_next::config_dir().map(|d| d.join("capture-bypass").join("config.toml"))
+}
+
+fn load_config() -> Config {
+    let path = match config_path() {
+        Some(p) => p,
+        None => return Config::default(),
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Config::default(),
+    };
+    toml::from_str(&text).unwrap_or_default()
+}
+
+fn save_config(cfg: &Config) {
+    let path = match config_path() {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(text) = toml::to_string_pretty(cfg) {
+        let _ = std::fs::write(path, text);
+    }
+}
 
 // ── Help content ──────────────────────────────────────────────────────────────
 //
@@ -125,7 +204,9 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
              \n\
              Mode toggle           Switch between One-shot and Persistent injection modes.\n\
              \n\
-             🔨 Stress Test        Launch stress_tester.exe to simulate a protected window.\n\
+             🔨 Stress Test        Launch stress_tester.exe — a self-protecting window for\n\
+                                    verifying injection.  Includes Scenario A (process scan)\n\
+                                    and Scenario B (module ejection) to test stealth defences.\n\
              \n\
              📖 Help               Opens this window."),
         ("Filter bar",
@@ -253,6 +334,47 @@ struct InjResult {
     ok: bool,
 }
 
+// ── Injection log ─────────────────────────────────────────────────────────────
+
+struct LogEntry {
+    time: Instant,
+    msg: String,
+    ok: bool,
+}
+
+// ── Column sort ───────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum SortCol { Pid, Process, Title, Status }
+
+impl SortCol {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => SortCol::Process,
+            2 => SortCol::Title,
+            3 => SortCol::Status,
+            _ => SortCol::Pid,
+        }
+    }
+    fn to_u8(self) -> u8 {
+        match self {
+            SortCol::Pid => 0,
+            SortCol::Process => 1,
+            SortCol::Title => 2,
+            SortCol::Status => 3,
+        }
+    }
+}
+
+// ── Update check state ────────────────────────────────────────────────────────
+
+enum UpdateState {
+    Checking,
+    Available(String), // newer tag name
+    UpToDate,
+    Failed,
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 
 struct App {
@@ -284,11 +406,36 @@ struct App {
     // Launch at Windows startup
     startup_enabled: bool,
 
-    // One-shot re-injection tracking:
-    // PIDs that were manually stripped in one-shot mode; monitored for re-protection.
+    // One-shot re-injection tracking
     one_shot_stripped: HashMap<u32, String>,
-    // PIDs that re-applied protection and are waiting for user action.
     reapply_alert: Vec<(u32, String)>,
+
+    // Injection log
+    log_entries: Vec<LogEntry>,
+    show_log: bool,
+
+    // Column sorting
+    sort_col: SortCol,
+    sort_asc: bool,
+
+    // Watch mode — inject automatically whenever a process with a watched name appears
+    watch_names: Vec<String>,
+    watch_input: String,
+    watch_seen: HashSet<u32>, // PIDs already handled by watch mode this session
+
+    // Global hotkey (Ctrl+Shift+B → Strip All Protected)
+    hotkey_enabled: bool,
+    hotkey_id: i32,
+
+    // Auto-update
+    update_state: Option<UpdateState>,
+    update_rx: Option<Receiver<UpdateState>>,
+
+    // Toast notifications (auto-inject strips show a desktop notification)
+    toast_enabled: bool,
+
+    // Process icon cache: process_name → egui TextureHandle
+    icon_cache: HashMap<String, Option<egui::TextureHandle>>,
 
     // Tray (must stay alive for the duration of the app)
     _tray_icon: Option<tray_icon::TrayIcon>,
@@ -308,6 +455,8 @@ impl App {
             .and_then(|p| p.parent().map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("."));
 
+        let cfg = load_config();
+
         let shared_windows: Arc<Mutex<Vec<WindowEntry>>> = Arc::new(Mutex::new(Vec::new()));
 
         // Kick off background refresh thread (500 ms interval)
@@ -324,18 +473,35 @@ impl App {
 
         let (inject_tx, inject_rx) = mpsc::channel();
 
+        // Kick off auto-update check in background
+        let (update_tx, update_rx) = mpsc::channel::<UpdateState>();
+        std::thread::spawn(move || {
+            let _ = update_tx.send(UpdateState::Checking);
+            match check_for_update() {
+                Ok(Some(tag)) => { let _ = update_tx.send(UpdateState::Available(tag)); }
+                Ok(None)      => { let _ = update_tx.send(UpdateState::UpToDate); }
+                Err(_)        => { let _ = update_tx.send(UpdateState::Failed); }
+            }
+        });
+
+        // Register global hotkey if saved as enabled
+        let hotkey_id = 1_i32;
+        if cfg.hotkey_enabled {
+            register_hotkey(hotkey_id);
+        }
+
         // Set up system tray
         let (tray_icon, tray_open_id, tray_quit_id) = build_tray();
 
-        App {
+        let mut app = App {
             shared_windows,
             exe_dir,
-            persistent_mode: false,
-            auto_inject_enabled: false,
+            persistent_mode: cfg.persistent_mode,
+            auto_inject_enabled: false, // started below if saved
             auto_inject_running: Arc::new(AtomicBool::new(false)),
             auto_inject_seen: Arc::new(Mutex::new(HashSet::new())),
             filter: String::new(),
-            protected_only: false,
+            protected_only: cfg.protected_only,
             show_help: false,
             help_section: 0,
             status_msg: String::from("Ready."),
@@ -344,13 +510,34 @@ impl App {
             startup_enabled: read_startup_reg(),
             one_shot_stripped: HashMap::new(),
             reapply_alert: Vec::new(),
+            log_entries: Vec::new(),
+            show_log: cfg.show_log,
+            sort_col: SortCol::from_u8(cfg.sort_col),
+            sort_asc: cfg.sort_asc,
+            watch_names: cfg.watch_names.clone(),
+            watch_input: String::new(),
+            watch_seen: HashSet::new(),
+            hotkey_enabled: cfg.hotkey_enabled,
+            hotkey_id,
+            update_state: None,
+            update_rx: Some(update_rx),
+            toast_enabled: cfg.toast_enabled,
+            icon_cache: HashMap::new(),
             _tray_icon: tray_icon,
             tray_open_id,
             tray_quit_id,
             quit_requested: false,
             inject_tx,
             inject_rx,
+        };
+
+        // Restore auto-inject if it was running when the app last closed
+        if cfg.auto_inject {
+            app.auto_inject_enabled = true;
+            app.start_auto_inject();
         }
+
+        app
     }
 
     // ── DLL path resolution ────────────────────────────────────────────────────
@@ -473,6 +660,22 @@ impl App {
         self.status_time = Some(Instant::now());
     }
 
+    // ── Persist config ─────────────────────────────────────────────────────────
+
+    fn persist(&self) {
+        save_config(&Config {
+            persistent_mode: self.persistent_mode,
+            auto_inject: self.auto_inject_enabled,
+            protected_only: self.protected_only,
+            toast_enabled: self.toast_enabled,
+            hotkey_enabled: self.hotkey_enabled,
+            show_log: self.show_log,
+            watch_names: self.watch_names.clone(),
+            sort_col: self.sort_col.to_u8(),
+            sort_asc: self.sort_asc,
+        });
+    }
+
     // ── Auto-inject ────────────────────────────────────────────────────────────
 
     fn start_auto_inject(&mut self) {
@@ -483,6 +686,8 @@ impl App {
         let exe_dir = self.exe_dir.clone();
         let persistent = self.persistent_mode;
         let tx = self.inject_tx.clone();
+
+        let toast = self.toast_enabled;
 
         std::thread::spawn(move || {
             while running.load(Ordering::Relaxed) {
@@ -502,10 +707,18 @@ impl App {
                     } else {
                         "payload_dll.dll"
                     };
-                    let dll = if w.is_32bit {
-                        exe_dir.join("..").join("i686-pc-windows-msvc").join("release").join(dll_name)
-                    } else {
-                        exe_dir.join(dll_name)
+                    // Mirror dll_path(): prefer {exe_dir}/x86/ for 32-bit, fall back to
+                    // Cargo dev layout only if the installed path doesn't exist.
+                    let resolve_dll = |is32: bool| -> PathBuf {
+                        if is32 {
+                            let installed = exe_dir.join("x86").join(dll_name);
+                            if installed.exists() {
+                                return installed;
+                            }
+                            exe_dir.join("..").join("i686-pc-windows-msvc").join("release").join(dll_name)
+                        } else {
+                            exe_dir.join(dll_name)
+                        }
                     };
 
                     let mut pids: Vec<(u32, String, bool)> =
@@ -517,20 +730,17 @@ impl App {
                     }
 
                     for (pid, name, is32) in pids {
-                        let dll_path = if is32 {
-                            exe_dir.join("..").join("i686-pc-windows-msvc").join("release").join(dll_name)
-                        } else {
-                            dll.clone()
-                        };
+                        let dll_path = resolve_dll(is32);
                         if !dll_path.exists() {
                             continue;
                         }
                         match injector_core::inject_dll_stealth(pid, &dll_path) {
                             Ok(()) => {
-                                let _ = tx.send(InjResult {
-                                    msg: format!("🤖 Auto-stripped {name} (PID {pid})"),
-                                    ok: true,
-                                });
+                                let msg = format!("🤖 Auto-stripped {name} (PID {pid})");
+                                if toast {
+                                    send_toast("capture-bypass", &msg);
+                                }
+                                let _ = tx.send(InjResult { msg, ok: true });
                             }
                             Err(_) => {}
                         }
@@ -551,7 +761,36 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ── Poll injection results ───────────────────────────────────────────
         while let Ok(result) = self.inject_rx.try_recv() {
+            self.log_entries.push(LogEntry {
+                time: Instant::now(),
+                msg: result.msg.clone(),
+                ok: result.ok,
+            });
+            if self.log_entries.len() > 500 {
+                self.log_entries.remove(0);
+            }
             self.set_status(result.msg, result.ok);
+        }
+
+        // ── Poll auto-update result ──────────────────────────────────────────
+        if let Some(rx) = &self.update_rx {
+            while let Ok(state) = rx.try_recv() {
+                self.update_state = Some(state);
+            }
+        }
+
+        // ── Poll global hotkey messages ──────────────────────────────────────
+        if self.hotkey_enabled {
+            unsafe {
+                let mut msg: MSG = std::mem::zeroed();
+                if PeekMessageW(&mut msg, None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool() {
+                    // WM_HOTKEY — Strip All Protected
+                    let all = self.shared_windows.lock().unwrap().clone();
+                    if all.iter().any(|w| w.is_protected) {
+                        self.strip_all_protected(&all);
+                    }
+                }
+            }
         }
 
         // ── Poll tray menu events ────────────────────────────────────────────
@@ -591,9 +830,25 @@ impl eframe::App for App {
             }
         }
 
+        // ── Watch mode — inject when a watched process name appears ─────────────
+        if !self.watch_names.is_empty() && !self.auto_inject_enabled {
+            for w in all_windows.iter() {
+                let matched = self.watch_names.iter().any(|n| {
+                    w.process_name.to_lowercase() == n.to_lowercase()
+                });
+                if matched && !self.watch_seen.contains(&w.pid) {
+                    self.watch_seen.insert(w.pid);
+                    self.inject_pid_async(w.pid, w.process_name.clone(), w.is_32bit);
+                }
+            }
+            // Prune PIDs that are no longer alive
+            let live_pids: HashSet<u32> = all_windows.iter().map(|w| w.pid).collect();
+            self.watch_seen.retain(|pid| live_pids.contains(pid));
+        }
+
         // Apply filter
         let filter_lc = self.filter.to_lowercase();
-        let filtered: Vec<&WindowEntry> = all_windows
+        let mut filtered: Vec<&WindowEntry> = all_windows
             .iter()
             .filter(|w| {
                 if self.protected_only && !w.is_protected {
@@ -608,6 +863,19 @@ impl eframe::App for App {
             })
             .collect();
 
+        // Apply column sort
+        let sort_col = self.sort_col;
+        let sort_asc = self.sort_asc;
+        filtered.sort_by(|a, b| {
+            let ord = match sort_col {
+                SortCol::Pid     => a.pid.cmp(&b.pid),
+                SortCol::Process => a.process_name.to_lowercase().cmp(&b.process_name.to_lowercase()),
+                SortCol::Title   => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+                SortCol::Status  => a.affinity.cmp(&b.affinity),
+            };
+            if sort_asc { ord } else { ord.reverse() }
+        });
+
         // ── Help window ──────────────────────────────────────────────────────
         render_help_window(ctx, &mut self.show_help, &mut self.help_section);
 
@@ -620,6 +888,12 @@ impl eframe::App for App {
         let mut toggle_help = false;
         let mut manual_refresh = false;
         let mut do_stress_test = false;
+        let mut toggle_log = false;
+        let mut toggle_hotkey = false;
+        let mut toggle_toast = false;
+        let mut new_sort: Option<(SortCol, bool)> = None;
+        let mut remove_watch: Option<usize> = None;
+        let mut add_watch = false;
         // Modal reapply actions — collected during modal rendering below.
         let mut dismiss_reapply = false;
         let mut switch_and_restrip = false;
@@ -634,11 +908,60 @@ impl eframe::App for App {
                         toggle_help = true;
                     }
                     ui.add_space(4.0);
+
+                    // Update available notification
+                    if let Some(UpdateState::Available(tag)) = &self.update_state {
+                        let tag = tag.clone();
+                        if ui
+                            .add(egui::Button::new(format!("🆕 v{tag} available"))
+                                .fill(Color32::from_rgb(80, 50, 10)))
+                            .on_hover_text("Click to open the releases page")
+                            .clicked()
+                        {
+                            let _ = open::that("https://github.com/Londopy/capture-bypass/releases/latest");
+                        }
+                        ui.add_space(4.0);
+                    }
+
+                    // Toast toggle
+                    let toast_label = if self.toast_enabled { "🔔 Toasts ON" } else { "🔕 Toasts" };
+                    if ui.add(egui::Button::new(toast_label)
+                        .fill(if self.toast_enabled { Color32::from_rgb(60, 60, 10) } else { Color32::from_rgb(50, 50, 50) }))
+                        .on_hover_text("Show a Windows notification when auto-inject strips a process")
+                        .clicked()
+                    {
+                        toggle_toast = true;
+                    }
+                    ui.add_space(4.0);
+
+                    // Hotkey toggle
+                    let hk_label = if self.hotkey_enabled { "⌨ Hotkey ON" } else { "⌨ Hotkey" };
+                    if ui.add(egui::Button::new(hk_label)
+                        .fill(if self.hotkey_enabled { Color32::from_rgb(40, 40, 80) } else { Color32::from_rgb(50, 50, 50) }))
+                        .on_hover_text("Ctrl+Shift+B — Strip All Protected")
+                        .clicked()
+                    {
+                        toggle_hotkey = true;
+                    }
+                    ui.add_space(4.0);
+
+                    // Log toggle
+                    let log_label = if self.show_log { "📋 Log ON" } else { "📋 Log" };
+                    if ui.add(egui::Button::new(log_label)
+                        .fill(if self.show_log { Color32::from_rgb(30, 60, 40) } else { Color32::from_rgb(50, 50, 50) }))
+                        .on_hover_text("Toggle the injection log panel")
+                        .clicked()
+                    {
+                        toggle_log = true;
+                    }
+                    ui.add_space(4.0);
+
                     if ui
                         .button("🔨 Stress Test")
                         .on_hover_text(
-                            "Launch stress_tester.exe to simulate a protected window\n\
-                             and verify capture bypass is working correctly.",
+                            "Launch stress_tester.exe — a self-protecting window.\n\
+                             Also tests Scenario A (process scan) and Scenario B\n\
+                             (module ejection) to verify stealth defences work.",
                         )
                         .clicked()
                     {
@@ -725,6 +1048,30 @@ impl eframe::App for App {
                     toggle_startup = true;
                 }
             });
+
+            // Watch mode row
+            ui.horizontal(|ui| {
+                ui.label("Watch:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.watch_input)
+                        .desired_width(150.0)
+                        .hint_text("process.exe"),
+                );
+                if ui.small_button("➕ Add").clicked() {
+                    add_watch = true;
+                }
+                ui.add_space(8.0);
+                let names: Vec<(usize, String)> = self.watch_names.iter().cloned().enumerate().collect();
+                for (i, name) in names {
+                    let resp = ui.add(
+                        egui::Button::new(format!("👁 {name}  ✕"))
+                            .fill(Color32::from_rgb(40, 60, 80)),
+                    );
+                    if resp.clicked() {
+                        remove_watch = Some(i);
+                    }
+                }
+            });
             ui.add_space(4.0);
         });
 
@@ -737,11 +1084,10 @@ impl eframe::App for App {
             let mode = if self.persistent_mode { "Persistent" } else { "One-shot" };
             self.set_status_neutral(format!("Mode: {mode}"));
             if self.persistent_mode {
-                // Persistent mode handles re-injection by itself — clear the
-                // one-shot tracking data and dismiss any pending alert.
                 self.one_shot_stripped.clear();
                 self.reapply_alert.clear();
             }
+            self.persist();
         }
         if toggle_auto {
             self.auto_inject_enabled = !self.auto_inject_enabled;
@@ -752,6 +1098,7 @@ impl eframe::App for App {
                 self.stop_auto_inject();
                 self.set_status_neutral("Auto-inject disabled.");
             }
+            self.persist();
         }
         if toggle_startup {
             let desired = !self.startup_enabled;
@@ -783,6 +1130,46 @@ impl eframe::App for App {
                     false,
                 );
             }
+        }
+        if toggle_log {
+            self.show_log = !self.show_log;
+            self.persist();
+        }
+        if toggle_hotkey {
+            self.hotkey_enabled = !self.hotkey_enabled;
+            if self.hotkey_enabled {
+                register_hotkey(self.hotkey_id);
+                self.set_status_neutral("⌨ Hotkey registered: Ctrl+Shift+B");
+            } else {
+                unregister_hotkey(self.hotkey_id);
+                self.set_status_neutral("⌨ Hotkey unregistered.");
+            }
+            self.persist();
+        }
+        if toggle_toast {
+            self.toast_enabled = !self.toast_enabled;
+            let s = if self.toast_enabled { "🔔 Toast notifications ON." } else { "🔕 Toast notifications OFF." };
+            self.set_status_neutral(s);
+            self.persist();
+        }
+        if add_watch {
+            let name = self.watch_input.trim().to_string();
+            if !name.is_empty() && !self.watch_names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                self.watch_names.push(name);
+                self.watch_input.clear();
+                self.persist();
+            }
+        }
+        if let Some(idx) = remove_watch {
+            if idx < self.watch_names.len() {
+                self.watch_names.remove(idx);
+                self.persist();
+            }
+        }
+        if let Some((col, asc)) = new_sort {
+            self.sort_col = col;
+            self.sort_asc = asc;
+            self.persist();
         }
         if do_strip_all {
             if all_windows.iter().any(|w| w.is_protected) {
@@ -847,6 +1234,43 @@ impl eframe::App for App {
             ui.add_space(4.0);
         });
 
+        // ── Injection log panel ──────────────────────────────────────────────
+        if self.show_log {
+            egui::TopBottomPanel::bottom("log_panel")
+                .resizable(true)
+                .min_height(80.0)
+                .default_height(150.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong("Injection Log");
+                        ui.add_space(8.0);
+                        if ui.small_button("Clear").clicked() {
+                            self.log_entries.clear();
+                        }
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for entry in &self.log_entries {
+                                let elapsed = entry.time.elapsed().as_secs();
+                                let color = if entry.ok {
+                                    Color32::from_rgb(100, 220, 100)
+                                } else {
+                                    Color32::from_rgb(220, 90, 90)
+                                };
+                                ui.label(
+                                    RichText::new(format!("[{elapsed}s ago]  {}", entry.msg))
+                                        .color(color)
+                                        .small()
+                                        .monospace(),
+                                );
+                            }
+                        });
+                });
+        }
+
         // ── Main table ───────────────────────────────────────────────────────
         // Collect any row-level injection requests
         let mut inject_target: Option<WindowEntry> = None;
@@ -863,6 +1287,7 @@ impl eframe::App for App {
                 .striped(true)
                 .resizable(false)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .column(Column::exact(22.0))   // Icon
                 .column(Column::exact(70.0))   // PID
                 .column(Column::exact(160.0))  // Process
                 .column(Column::exact(40.0))   // Arch
@@ -870,17 +1295,50 @@ impl eframe::App for App {
                 .column(Column::exact(115.0))  // Status
                 .column(Column::exact(150.0))  // Action
                 .header(22.0, |mut header| {
-                    header.col(|ui| { ui.strong("PID"); });
-                    header.col(|ui| { ui.strong("Process"); });
+                    header.col(|ui| { ui.strong(""); }); // Icon (no label)
+                    let sc = sort_col;
+                    let sa = sort_asc;
+                    let arrow = |col: SortCol| -> &'static str {
+                        if sc == col { if sa { " ▲" } else { " ▼" } } else { "" }
+                    };
+                    header.col(|ui| {
+                        if ui.button(format!("PID{}", arrow(SortCol::Pid))).clicked() {
+                            new_sort = Some((SortCol::Pid, if sc == SortCol::Pid { !sa } else { true }));
+                        }
+                    });
+                    header.col(|ui| {
+                        if ui.button(format!("Process{}", arrow(SortCol::Process))).clicked() {
+                            new_sort = Some((SortCol::Process, if sc == SortCol::Process { !sa } else { true }));
+                        }
+                    });
                     header.col(|ui| { ui.strong("Arch"); });
-                    header.col(|ui| { ui.strong("Window Title"); });
-                    header.col(|ui| { ui.strong("Status"); });
+                    header.col(|ui| {
+                        if ui.button(format!("Window Title{}", arrow(SortCol::Title))).clicked() {
+                            new_sort = Some((SortCol::Title, if sc == SortCol::Title { !sa } else { true }));
+                        }
+                    });
+                    header.col(|ui| {
+                        if ui.button(format!("Status{}", arrow(SortCol::Status))).clicked() {
+                            new_sort = Some((SortCol::Status, if sc == SortCol::Status { !sa } else { true }));
+                        }
+                    });
                     header.col(|ui| { ui.strong("Action"); });
                 })
                 .body(|mut body| {
                     for entry in &filtered {
                         let row_h = 26.0;
                         body.row(row_h, |mut row| {
+                            // Process icon
+                            row.col(|ui| {
+                                if let Some(tex) = get_process_icon(
+                                    &entry.process_name,
+                                    &mut self.icon_cache,
+                                    ctx,
+                                    &self.exe_dir,
+                                ) {
+                                    ui.add(egui::Image::new(&tex).max_size([16.0, 16.0].into()).fit_to_exact_size([16.0, 16.0].into()));
+                                }
+                            });
                             // PID
                             row.col(|ui| {
                                 ui.monospace(entry.pid.to_string());
@@ -1316,6 +1774,192 @@ fn write_startup_reg(enable: bool) -> bool {
             Err(_) => false,
         }
     }
+}
+
+// ── Global hotkey helpers ─────────────────────────────────────────────────────
+
+fn register_hotkey(id: i32) {
+    unsafe {
+        let _ = RegisterHotKey(
+            None,
+            id,
+            HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_SHIFT.0),
+            u32::from('B'),
+        );
+    }
+}
+
+fn unregister_hotkey(id: i32) {
+    unsafe {
+        let _ = UnregisterHotKey(None, id);
+    }
+}
+
+// ── Toast notification helper ─────────────────────────────────────────────────
+// Uses a simple PowerShell one-liner so we don't need the WinRT COM machinery.
+
+fn send_toast(title: &str, body: &str) {
+    let script = format!(
+        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, \
+         ContentType = WindowsRuntime] | Out-Null; \
+         $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(\
+           [Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
+         $template.GetElementsByTagName('text')[0].AppendChild($template.CreateTextNode('{title}')) | Out-Null; \
+         $template.GetElementsByTagName('text')[1].AppendChild($template.CreateTextNode('{body}')) | Out-Null; \
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('capture-bypass')\
+           .Show([Windows.UI.Notifications.ToastNotification]::new($template))",
+        title = title.replace('\'', ""),
+        body  = body.replace('\'', ""),
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+        .spawn();
+}
+
+// ── Auto-update check ─────────────────────────────────────────────────────────
+
+fn check_for_update() -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let current = env!("CARGO_PKG_VERSION");
+    let resp: serde_json::Value = ureq::get(
+        "https://api.github.com/repos/Londopy/capture-bypass/releases/latest",
+    )
+    .set("User-Agent", &format!("capture-bypass/{current}"))
+    .call()?
+    .into_json()?;
+
+    let tag = resp["tag_name"]
+        .as_str()
+        .unwrap_or("")
+        .trim_start_matches('v')
+        .to_string();
+
+    if tag.is_empty() || tag == current {
+        Ok(None)
+    } else {
+        Ok(Some(tag))
+    }
+}
+
+// ── Process icon helpers ──────────────────────────────────────────────────────
+
+/// Resolve the full executable path from process name by scanning
+/// the window list process names — used to locate the exe for SHGetFileInfoW.
+fn find_exe_path(process_name: &str) -> Option<PathBuf> {
+    // Walk all running processes and return the first full path that matches the name
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut entry: windows::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W =
+            std::mem::zeroed();
+        entry.dwSize =
+            std::mem::size_of::<windows::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W>()
+                as u32;
+        if windows::Win32::System::Diagnostics::ToolHelp::Process32FirstW(snap, &mut entry).is_err() {
+            return None;
+        }
+        loop {
+            let name_raw: Vec<u16> = entry.szExeFile.iter().copied().take_while(|&c| c != 0).collect();
+            let name = String::from_utf16_lossy(&name_raw);
+            if name.eq_ignore_ascii_case(process_name) {
+                let pid = entry.th32ProcessID;
+                if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                    let mut buf = [0u16; 1024];
+                    let mut sz = buf.len() as u32;
+                    if QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32,
+                        windows::core::PWSTR(buf.as_mut_ptr()), &mut sz).is_ok()
+                    {
+                        return Some(PathBuf::from(String::from_utf16_lossy(&buf[..sz as usize]).as_ref()));
+                    }
+                }
+            }
+            if windows::Win32::System::Diagnostics::ToolHelp::Process32NextW(snap, &mut entry).is_err() {
+                break;
+            }
+        }
+    }
+    None
+}
+
+fn load_icon_for_process(
+    process_name: &str,
+    ctx: &egui::Context,
+) -> Option<egui::TextureHandle> {
+    let exe_path = find_exe_path(process_name)?;
+    let path_wide: Vec<u16> = exe_path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut sfi: SHFILEINFOW = std::mem::zeroed();
+        let flags = SHGFI_ICON | SHGFI_SMALLICON;
+        let res = SHGetFileInfoW(
+            windows::core::PCWSTR(path_wide.as_ptr()),
+            windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut sfi),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            flags,
+        );
+        if res == 0 {
+            return None;
+        }
+        let hicon = sfi.hIcon;
+
+        let mut icon_info: ICONINFO = std::mem::zeroed();
+        if GetIconInfo(hicon, &mut icon_info).is_err() {
+            return None;
+        }
+
+        let hbmp = icon_info.hbmColor;
+        let mut bmi: BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+
+        let hdc = GetDC(None);
+        // First call: populate width/height
+        GetDIBits(hdc, hbmp, 0, 0, None, &mut bmi, DIB_RGB_COLORS);
+        let w = bmi.bmiHeader.biWidth.unsigned_abs() as usize;
+        let h = bmi.bmiHeader.biHeight.unsigned_abs() as usize;
+
+        if w == 0 || h == 0 {
+            ReleaseDC(None, hdc);
+            return None;
+        }
+
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB.0;
+        bmi.bmiHeader.biHeight = -(h as i32); // top-down DIB
+
+        let mut pixels = vec![0u8; w * h * 4];
+        GetDIBits(hdc, hbmp, 0, h as u32, Some(pixels.as_mut_ptr().cast()), &mut bmi, DIB_RGB_COLORS);
+        ReleaseDC(None, hdc);
+
+        // Windows returns BGRA — swap B and R to get RGBA
+        for px in pixels.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+
+        let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(hicon);
+
+        let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels);
+        Some(ctx.load_texture(
+            format!("icon_{process_name}"),
+            image,
+            egui::TextureOptions::LINEAR,
+        ))
+    }
+}
+
+/// Returns cached icon, loading it on first access.
+fn get_process_icon<'a>(
+    process_name: &str,
+    cache: &'a mut HashMap<String, Option<egui::TextureHandle>>,
+    ctx: &egui::Context,
+    _exe_dir: &Path,
+) -> Option<&'a egui::TextureHandle> {
+    cache
+        .entry(process_name.to_string())
+        .or_insert_with(|| load_icon_for_process(process_name, ctx))
+        .as_ref()
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
