@@ -157,7 +157,10 @@ Root: HKCU; \
 ; ── [Run] ─────────────────────────────────────────────────────────────────────
 
 [Run]
-; Offer to launch the app after installation finishes
+; Offer to launch the app after installation finishes.
+; shellexec is required because the installer runs without elevation but the
+; app's manifest requests requireAdministrator — ShellExecuteEx handles this
+; correctly (triggers the UAC prompt), while CreateProcess would return error 740.
 Filename: "{app}\{#MyAppExeName}"; \
   Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; \
-  Flags: nowait postinstall skipifsilent
+  Flags: nowait postinstall skipifsilent shellexec

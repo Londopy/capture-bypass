@@ -1510,21 +1510,30 @@ fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize)
         .open(show)
         .resizable(true)
         .collapsible(false)
-        .default_size([860.0, 580.0])
-        .min_size([580.0, 380.0])
+        .default_size([780.0, 560.0])
+        .min_size([540.0, 360.0])
+        .max_size([1400.0, 1000.0])
         .show(ctx, |ui| {
+            // Capture the full available width BEFORE entering any inner layout
+            // so we can constrain the content scroll area and prevent labels
+            // from expanding the window horizontally past its set size.
+            let total_w = ui.available_width();
+            let nav_w = 170.0_f32;
+            let sep_w = 8.0_f32; // approximate separator + spacing
+            let content_w = (total_w - nav_w - sep_w).max(200.0);
+
             ui.horizontal_top(|ui| {
                 // ── Left nav sidebar ─────────────────────────────────────────
                 egui::ScrollArea::vertical()
                     .id_salt("help_nav")
-                    .max_width(170.0)
+                    .max_width(nav_w)
                     .show(ui, |ui| {
-                        ui.set_min_width(160.0);
+                        ui.set_min_width(nav_w - 10.0);
                         ui.add_space(4.0);
                         for (i, (title, _)) in HELP_SECTIONS.iter().enumerate() {
                             let selected = *section == i;
                             let label = egui::SelectableLabel::new(selected, *title);
-                            if ui.add_sized([160.0, 28.0], label).clicked() {
+                            if ui.add_sized([nav_w - 10.0, 28.0], label).clicked() {
                                 *section = i;
                             }
                         }
@@ -1535,8 +1544,12 @@ fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize)
                 // ── Right content area ───────────────────────────────────────
                 egui::ScrollArea::vertical()
                     .id_salt("help_content")
-                    .auto_shrink([false; 2])
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        // Hard-cap width so labels wrap instead of
+                        // pushing the window wider than its set size.
+                        ui.set_max_width(content_w);
+
                         if let Some((tab_title, sub_sections)) = HELP_SECTIONS.get(*section) {
                             ui.add_space(4.0);
                             ui.label(RichText::new(*tab_title).size(18.0).strong());
@@ -1962,6 +1975,19 @@ fn send_toast(title: &str, body: &str) {
 
 // ── Auto-update check ─────────────────────────────────────────────────────────
 
+/// Parse "X.Y.Z" (with or without a leading 'v') into a comparable tuple.
+fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
+    let s = s.trim().trim_start_matches('v');
+    let mut parts = s.splitn(4, '.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()
+        // strip any pre-release suffix like "-alpha.1"
+        .map(|p| p.split('-').next().unwrap_or(p))
+        .and_then(|p| p.parse().ok())?;
+    Some((major, minor, patch))
+}
+
 fn check_for_update() -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
     let current = env!("CARGO_PKG_VERSION");
     let resp: serde_json::Value = ureq::get(
@@ -1971,16 +1997,19 @@ fn check_for_update() -> Result<Option<String>, Box<dyn std::error::Error + Send
     .call()?
     .into_json()?;
 
-    let tag = resp["tag_name"]
-        .as_str()
-        .unwrap_or("")
-        .trim_start_matches('v')
-        .to_string();
+    let raw_tag = resp["tag_name"].as_str().unwrap_or("").trim().to_string();
+    if raw_tag.is_empty() {
+        return Ok(None);
+    }
 
-    if tag.is_empty() || tag == current {
-        Ok(None)
-    } else {
-        Ok(Some(tag))
+    // Only show the banner when the remote version is strictly newer.
+    // Semver comparison avoids false positives when Cargo.toml and the
+    // GitHub tag differ in format (e.g. "1.0.0" vs "v1.0.0").
+    let remote_ver = parse_semver(&raw_tag);
+    let current_ver = parse_semver(current);
+    match (current_ver, remote_ver) {
+        (Some(c), Some(r)) if r > c => Ok(Some(raw_tag.trim_start_matches('v').to_string())),
+        _ => Ok(None),
     }
 }
 
