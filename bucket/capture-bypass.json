@@ -1,0 +1,28 @@
+{
+  "version": "3.5.2",
+  "description": "Removes WDA_EXCLUDEFROMCAPTURE screen-capture protection from Windows application windows.",
+  "homepage": "https://github.com/Londopy/capture-bypass",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/Londopy/capture-bypass/releases/download/v3.5.2/capture-bypass-3.5.2-portable-x64.zip",
+      "hash": "sha256:placeholder"
+    }
+  },
+  "bin": [
+    ["capture_bypass_gui.exe", "capture-bypass"]
+  ],
+  "shortcuts": [
+    ["capture_bypass_gui.exe", "capture-bypass"]
+  ],
+  "checkver": {
+    "github": "https://github.com/Londopy/capture-bypass"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/Londopy/capture-bypass/releases/download/v$version/capture-bypass-$version-portable-x64.zip"
+      }
+    }
+  }
+}
