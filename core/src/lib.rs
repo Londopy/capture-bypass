@@ -75,7 +75,7 @@ impl std::fmt::Display for InjectError {
 impl std::error::Error for InjectError {}
 
 /// Type alias for convenience.
-pub type InjectResult = Result<(), InjectError>;
+pub type InjectResult = std::result::Result<(), InjectError>;
 
 /// High-level entry point that returns a typed [`InjectError`] instead of a
 /// raw `windows::core::Error`.  Prefer this over [`inject_dll`] when you want
@@ -94,7 +94,7 @@ pub fn inject_checked(pid: u32, dll_path: &Path) -> InjectResult {
     result
 }
 
-fn make_stealth_copy(pid: u32, dll_path: &Path) -> Result<std::path::PathBuf, std::io::Error> {
+fn make_stealth_copy(pid: u32, dll_path: &Path) -> std::result::Result<std::path::PathBuf, std::io::Error> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
