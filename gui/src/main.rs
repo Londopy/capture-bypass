@@ -406,7 +406,7 @@ impl App {
                 });
                 return;
             }
-            match injector_core::inject_dll(pid, &dll_path) {
+            match injector_core::inject_dll_stealth(pid, &dll_path) {
                 Ok(()) => {
                     let _ = tx.send(InjResult {
                         msg: format!(
@@ -536,7 +536,7 @@ impl App {
                         if !dll_path.exists() {
                             continue;
                         }
-                        match injector_core::inject_dll(pid, &dll_path) {
+                        match injector_core::inject_dll_stealth(pid, &dll_path) {
                             Ok(()) => {
                                 let _ = tx.send(InjResult {
                                     msg: format!("🤖 Auto-stripped {name} (PID {pid})"),

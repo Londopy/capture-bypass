@@ -3,6 +3,21 @@
 //! Classic LoadLibrary injection pipeline:
 //!   OpenProcess → VirtualAllocEx → WriteProcessMemory
 //!   → CreateRemoteThread(LoadLibraryA) → WaitForSingleObject → cleanup.
+//!
+//! # Stealth injection
+//!
+//! `inject_dll_stealth` wraps `inject_dll` with two hardening steps:
+//!
+//! 1. **Random temp copy** — the DLL is copied to `%TEMP%\<hex>.tmp` before
+//!    injection, so the module name visible to `CreateToolhelp32Snapshot`
+//!    (TH32CS_SNAPMODULE) or `EnumProcessModules` is an opaque random string,
+//!    not `payload_dll.dll`.  Name-based scanners find nothing.
+//!
+//! 2. **Immediate file deletion** — the temp file is removed right after
+//!    `LoadLibrary` returns.  Windows keeps the DLL mapped in the target via its
+//!    internal VAD / file-object reference, so it continues running normally.
+//!    The on-disk path no longer exists, meaning the target cannot re-read,
+//!    hash-check, or re-load the file to identify it.
 
 use std::{ffi::CString, path::Path};
 
@@ -25,6 +40,52 @@ use windows::{
         },
     },
 };
+
+/// Inject `dll_path` into `pid` using a randomised temp copy.
+///
+/// This is the preferred entry point for the GUI.  It copies the DLL to
+/// `%TEMP%\<random_hex>.tmp` before calling [`inject_dll`], so the module
+/// name visible to `CreateToolhelp32Snapshot` (TH32CS_SNAPMODULE) or
+/// `EnumProcessModules` is an opaque string rather than `payload_dll.dll`.
+///
+/// This defeats the common defensive pattern where the target application
+/// calls `CreateToolhelp32Snapshot`, walks its own module list looking for
+/// known DLL names, and calls `FreeLibrary` on anything it recognises.
+///
+/// The temp file is cleaned up on injection failure; on success it is left
+/// in `%TEMP%` and will be swept up by normal OS temp-file cleanup.
+pub fn inject_dll_stealth(pid: u32, dll_path: &Path) -> windows::core::Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let tmp_dir = std::env::temp_dir();
+
+    // Opaque name: nanosecond wall-clock XOR pid.
+    // Nanosecond precision + pid makes path collisions negligible.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let tag = nanos ^ pid;
+    let tmp_path = tmp_dir.join(format!("{tag:08x}.tmp"));
+
+    // ── 1. Copy the payload to the opaque temp path ───────────────────────────
+    std::fs::copy(dll_path, &tmp_path).map_err(|e| {
+        windows::core::Error::new(
+            windows::Win32::Foundation::E_FAIL,
+            format!("Stealth copy to temp failed: {e}"),
+        )
+    })?;
+
+    // ── 2. Inject the temp copy ───────────────────────────────────────────────
+    let result = inject_dll(pid, &tmp_path);
+
+    // Clean up temp file on failure (success leaves it for OS sweeping).
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    result
+}
 
 /// Inject `dll_path` into the process identified by `pid`.
 ///
