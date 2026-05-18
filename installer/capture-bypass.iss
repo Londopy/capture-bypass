@@ -176,11 +176,11 @@ Filename: "{app}\{#MyAppExeName}"; \
 ; ── [Code] ────────────────────────────────────────────────────────────────────
 
 [Code]
-{ Check whether capture_bypass_gui.exe is currently running.
-  Called by Inno Setup before the install begins (PrepareToInstall).
-  Because the app runs elevated and the installer does not, we cannot
-  terminate it programmatically — we block the install and tell the user
-  to quit from the system tray first. }
+// Check whether capture_bypass_gui.exe is currently running.
+// Called by Inno Setup before the install begins (PrepareToInstall).
+// Because the app runs elevated and the installer does not, we cannot
+// terminate it programmatically — we block the install and tell the user
+// to quit from the system tray first.
 function IsAppRunning(const ExeName: String): Boolean;
 var
   WbemLocator  : Variant;
@@ -195,7 +195,7 @@ begin
       'SELECT Name FROM Win32_Process WHERE Name="' + ExeName + '"');
     Result := (WbemObjectSet.Count > 0);
   except
-    { WMI unavailable — fall through and allow install }
+    // WMI unavailable — fall through and allow install
   end;
 end;
 
@@ -204,8 +204,7 @@ begin
   Result := '';
   if IsAppRunning('{#MyAppExeName}') then
     Result :=
-      'capture-bypass is currently running.' + #13#10 +
-      #13#10 +
+      'capture-bypass is currently running.' + #13#10 + #13#10 +
       'Please quit it before upgrading:' + #13#10 +
       '  1. Right-click the capture-bypass icon in the system tray.' + #13#10 +
       '  2. Click Quit.' + #13#10 +
