@@ -69,10 +69,34 @@ jobs:
             /DMyAppVersion=$version `
             installer\capture-bypass.iss
 
-      # ── 7. Create GitHub Release & attach installer ──────────────────────────
+      # ── 7. Compute SHA-256 checksum & write release body prefix ────────────
+      - name: Compute checksum
+        shell: pwsh
+        run: |
+          $version  = "${{ github.ref_name }}".TrimStart('v')
+          $filename = "capture-bypass-setup-$version-x64.exe"
+          $hash     = (Get-FileHash "dist\$filename" -Algorithm SHA256).Hash
+
+          # SHA256SUMS.txt — attached as a release asset
+          "$hash  $filename" | Out-File -FilePath dist\SHA256SUMS.txt -Encoding utf8NoBOM
+
+          # release-body.txt — prepended to the auto-generated release notes
+          @"
+          ## Verify before running
+          ``````powershell
+          Get-FileHash .\$filename -Algorithm SHA256
+          ``````
+          **Expected SHA-256:** ``$hash``
+
+          ---
+          "@ -replace '^ {10}', '' | Out-File -FilePath dist\release-body.txt -Encoding utf8NoBOM
+
+      # ── 8. Create GitHub Release & attach installer + checksum ───────────────
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true   # auto-fills body from commit messages
+          body_path: dist/release-body.txt
           files: |
             dist/capture-bypass-setup-*-x64.exe
+            dist/SHA256SUMS.txt
