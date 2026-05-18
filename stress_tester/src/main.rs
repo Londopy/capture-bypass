@@ -43,7 +43,7 @@ use std::{
 };
 
 use windows::Win32::{
-    Foundation::{BOOL, HMODULE, HWND, LPARAM, TRUE},
+    Foundation::{BOOL, HWND, LPARAM, TRUE},
     System::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW,
@@ -152,8 +152,7 @@ fn eject_matching_modules(pid: u32, pattern: &str, also_tmp: bool) -> u32 {
             let hit = (!pattern.is_empty() && name.contains(&pattern.to_lowercase()))
                 || (also_tmp && name.ends_with(".tmp"));
             if hit {
-                let hmod = HMODULE(entry.hModule as *mut _);
-                if FreeLibrary(hmod).is_ok() {
+                if FreeLibrary(entry.hModule).is_ok() {
                     ejected += 1;
                 }
             }
@@ -664,9 +663,9 @@ impl eframe::App for App {
                 ui.add_space(16.0);
 
                 // ── Tip box ───────────────────────────────────────────────────
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(Color32::from_rgb(30, 30, 50))
-                    .inner_margin(egui::Margin::same(10.0))
+                    .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
                         ui.label(RichText::new("💡  Quick test guide").strong());
                         ui.add_space(4.0);
