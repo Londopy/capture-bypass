@@ -4,11 +4,14 @@ A Windows utility that removes `WDA_EXCLUDEFROMCAPTURE` display-affinity protect
 
 > **Legal notice:** By downloading, installing, cloning, or running this project in any form, you agree to the [Terms of Service](TERMS_OF_SERVICE.md) and [Disclaimer](DISCLAIMER.md). Only use this tool on windows and processes you own or have explicit permission to capture. If you do not agree, do not use this software.
 
+[![CI](https://github.com/Londopy/capture-bypass/actions/workflows/release.yml/badge.svg)](https://github.com/Londopy/capture-bypass/actions/workflows/release.yml)
 ![Release](https://img.shields.io/github/v/release/Londopy/capture-bypass) 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/Londopy/HideDesktopApps/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/Londopy/capture-bypass/blob/main/LICENSE)
 ![Files](https://img.shields.io/github/directory-file-count/Londopy/capture-bypass) 
 ![Issues](https://img.shields.io/github/issues/Londopy/capture-bypass) 
-![Size](https://img.shields.io/github/languages/code-size/Londopy/capture-bypass) 
+![Size](https://img.shields.io/github/languages/code-size/Londopy/capture-bypass)
+[![Rust](https://img.shields.io/badge/rust-1.78%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4?logo=windows&logoColor=white)](https://github.com/Londopy/capture-bypass/releases/latest)
 
 ---
 
