@@ -37,11 +37,13 @@ use windows::Win32::{
     },
     UI::{
         Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON},
+        Input::KeyboardAndMouse::{
+            HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, UnregisterHotKey,
+        },
         WindowsAndMessaging::{
             EnumWindows, GetIconInfo, GetWindowDisplayAffinity, GetWindowTextW,
-            GetWindowThreadProcessId, IsWindowVisible, PeekMessageW, RegisterHotKey,
-            UnregisterHotKey, HOT_KEY_MODIFIERS, ICONINFO, MOD_CONTROL, MOD_SHIFT, MSG,
-            PEEK_MESSAGE_REMOVE_TYPE, PM_REMOVE, WM_HOTKEY,
+            GetWindowThreadProcessId, ICONINFO, IsWindowVisible, MSG, PeekMessageW,
+            PM_REMOVE, WM_HOTKEY,
         },
     },
 };
@@ -1336,7 +1338,7 @@ impl eframe::App for App {
                                     ctx,
                                     &self.exe_dir,
                                 ) {
-                                    ui.add(egui::Image::new(&tex).max_size([16.0, 16.0].into()).fit_to_exact_size([16.0, 16.0].into()));
+                                    ui.add(egui::Image::new(&*tex).max_size([16.0, 16.0].into()).fit_to_exact_size([16.0, 16.0].into()));
                                 }
                             });
                             // PID
@@ -1867,7 +1869,7 @@ fn find_exe_path(process_name: &str) -> Option<PathBuf> {
                     if QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32,
                         windows::core::PWSTR(buf.as_mut_ptr()), &mut sz).is_ok()
                     {
-                        return Some(PathBuf::from(String::from_utf16_lossy(&buf[..sz as usize]).as_ref()));
+                        return Some(PathBuf::from(String::from_utf16_lossy(&buf[..sz as usize]).as_str()));
                     }
                 }
             }
