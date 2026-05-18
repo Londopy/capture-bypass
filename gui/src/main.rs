@@ -199,16 +199,22 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                           OK        = WDA_NONE (capturable)\n\
              Action   — \"Strip Protection\" button for that row"),
         ("Header buttons",
-            "⟳ Refresh             Re-enumerate all windows and update status badges.\n\
+            "⟳ Refresh             Re-enumerate all windows immediately.\n\
              \n\
-             ⚡ Strip All Protected One click injects into every currently-protected PID.\n\
-                                    Deduplicates so each process is only injected once.\n\
+             ⚡ Strip All Protected Inject into every currently-protected PID at once.\n\
+                                    Each process is injected only once even if it owns\n\
+                                    multiple protected windows.\n\
              \n\
-             Mode toggle           Switch between One-shot and Persistent injection modes.\n\
+             Mode                  Toggle between One-shot and Persistent injection.\n\
              \n\
-             🔨 Stress Test        Launch stress_tester.exe — a self-protecting window for\n\
-                                    verifying injection.  Includes Scenario A (process scan)\n\
-                                    and Scenario B (module ejection) to test stealth defences.\n\
+             🔨 Stress Test        Launch stress_tester.exe — a self-protecting window.\n\
+                                    Includes Fight Mode, Scenario A (process scan),\n\
+                                    and Scenario B (module ejection).\n\
+             \n\
+             ⚙ Settings            Opens the Settings window (startup, notifications,\n\
+                                    and global hotkey).\n\
+             \n\
+             📋 Log                Toggle the injection history panel.\n\
              \n\
              📖 Help               Opens this window."),
         ("Filter bar",
@@ -217,10 +223,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
              \"Protected only\" checkbox hides all unprotected windows.\n\
              \n\
              🤖 Auto-inject — background thread strips newly-protected windows \
-             automatically.  Continues running while the app is minimised to tray.\n\
-             \n\
-             🚀 Start with Windows — writes a registry Run entry so the app launches \
-             on login.  A UAC prompt will appear each time due to the admin manifest."),
+             automatically.  Continues running while the app is minimised to tray."),
         ("Status bar",
             "Shows the last action result and how long ago it occurred.\n\
              Green = success     Red = error     Gray = neutral / informational"),
@@ -399,6 +402,7 @@ struct App {
     protected_only: bool,
     show_help: bool,
     help_section: usize,
+    show_settings: bool,
 
     // Status bar
     status_msg: String,
@@ -506,6 +510,7 @@ impl App {
             protected_only: cfg.protected_only,
             show_help: false,
             help_section: 0,
+            show_settings: false,
             status_msg: String::from("Ready."),
             status_color: Color32::GRAY,
             status_time: None,
@@ -881,18 +886,31 @@ impl eframe::App for App {
         // ── Help window ──────────────────────────────────────────────────────
         render_help_window(ctx, &mut self.show_help, &mut self.help_section);
 
+        // ── Settings window ──────────────────────────────────────────────────
+        let mut toggle_startup_from_settings  = false;
+        let mut toggle_toast_from_settings    = false;
+        let mut toggle_hotkey_from_settings   = false;
+        render_settings_window(
+            ctx,
+            &mut self.show_settings,
+            self.startup_enabled,
+            self.toast_enabled,
+            self.hotkey_enabled,
+            &mut toggle_startup_from_settings,
+            &mut toggle_toast_from_settings,
+            &mut toggle_hotkey_from_settings,
+        );
+
         // ── Top bar ──────────────────────────────────────────────────────────
         // Collect actions here to avoid borrow conflicts
         let mut do_strip_all = false;
         let mut toggle_mode = false;
         let mut toggle_auto = false;
-        let mut toggle_startup = false;
         let mut toggle_help = false;
+        let mut toggle_settings = false;
         let mut manual_refresh = false;
         let mut do_stress_test = false;
         let mut toggle_log = false;
-        let mut toggle_hotkey = false;
-        let mut toggle_toast = false;
         let mut new_sort: Option<(SortCol, bool)> = None;
         let mut remove_watch: Option<usize> = None;
         let mut add_watch = false;
@@ -925,25 +943,13 @@ impl eframe::App for App {
                         ui.add_space(4.0);
                     }
 
-                    // Toast toggle
-                    let toast_label = if self.toast_enabled { "🔔 Toasts ON" } else { "🔕 Toasts" };
-                    if ui.add(egui::Button::new(toast_label)
-                        .fill(if self.toast_enabled { Color32::from_rgb(60, 60, 10) } else { Color32::from_rgb(50, 50, 50) }))
-                        .on_hover_text("Show a Windows notification when auto-inject strips a process")
+                    // Settings
+                    if ui.add(egui::Button::new("⚙ Settings")
+                        .fill(Color32::from_rgb(50, 50, 50)))
+                        .on_hover_text("Startup, notifications, hotkey")
                         .clicked()
                     {
-                        toggle_toast = true;
-                    }
-                    ui.add_space(4.0);
-
-                    // Hotkey toggle
-                    let hk_label = if self.hotkey_enabled { "⌨ Hotkey ON" } else { "⌨ Hotkey" };
-                    if ui.add(egui::Button::new(hk_label)
-                        .fill(if self.hotkey_enabled { Color32::from_rgb(40, 40, 80) } else { Color32::from_rgb(50, 50, 50) }))
-                        .on_hover_text("Ctrl+Shift+B — Strip All Protected")
-                        .clicked()
-                    {
-                        toggle_hotkey = true;
+                        toggle_settings = true;
                     }
                     ui.add_space(4.0);
 
@@ -1030,25 +1036,6 @@ impl eframe::App for App {
                 if ui.add(auto_btn).clicked() {
                     toggle_auto = true;
                 }
-
-                ui.add_space(12.0);
-
-                let startup_label = if self.startup_enabled {
-                    "🚀 Start with Windows ON"
-                } else {
-                    "🚀 Start with Windows"
-                };
-                let startup_btn = egui::Button::new(startup_label)
-                    .fill(if self.startup_enabled {
-                        Color32::from_rgb(60, 100, 30)
-                    } else {
-                        Color32::from_rgb(50, 50, 50)
-                    });
-                let startup_resp = ui.add(startup_btn)
-                    .on_hover_text("Adds this app to HKCU\\Run so it launches on login.\nWindows will show a UAC prompt each time because the app requires Administrator rights.");
-                if startup_resp.clicked() {
-                    toggle_startup = true;
-                }
             });
 
             // Watch mode row
@@ -1102,19 +1089,6 @@ impl eframe::App for App {
             }
             self.persist();
         }
-        if toggle_startup {
-            let desired = !self.startup_enabled;
-            if write_startup_reg(desired) {
-                self.startup_enabled = desired;
-                if desired {
-                    self.set_status("🚀 Added to Windows startup.", true);
-                } else {
-                    self.set_status_neutral("Removed from Windows startup.");
-                }
-            } else {
-                self.set_status("✗ Could not write startup registry key.", false);
-            }
-        }
         if manual_refresh {
             // Background thread handles refresh; just show feedback
             self.set_status_neutral("Refreshing…");
@@ -1137,7 +1111,27 @@ impl eframe::App for App {
             self.show_log = !self.show_log;
             self.persist();
         }
-        if toggle_hotkey {
+        if toggle_settings {
+            self.show_settings = !self.show_settings;
+        }
+        // Actions forwarded from the settings window
+        if toggle_startup_from_settings {
+            let desired = !self.startup_enabled;
+            if write_startup_reg(desired) {
+                self.startup_enabled = desired;
+                let s = if desired { "🚀 Added to Windows startup." } else { "Removed from Windows startup." };
+                self.set_status(s, desired);
+            } else {
+                self.set_status("✗ Could not write startup registry key.", false);
+            }
+        }
+        if toggle_toast_from_settings {
+            self.toast_enabled = !self.toast_enabled;
+            let s = if self.toast_enabled { "🔔 Toast notifications ON." } else { "🔕 Toast notifications OFF." };
+            self.set_status_neutral(s);
+            self.persist();
+        }
+        if toggle_hotkey_from_settings {
             self.hotkey_enabled = !self.hotkey_enabled;
             if self.hotkey_enabled {
                 register_hotkey(self.hotkey_id);
@@ -1146,12 +1140,6 @@ impl eframe::App for App {
                 unregister_hotkey(self.hotkey_id);
                 self.set_status_neutral("⌨ Hotkey unregistered.");
             }
-            self.persist();
-        }
-        if toggle_toast {
-            self.toast_enabled = !self.toast_enabled;
-            let s = if self.toast_enabled { "🔔 Toast notifications ON." } else { "🔕 Toast notifications OFF." };
-            self.set_status_neutral(s);
             self.persist();
         }
         if add_watch {
@@ -1487,6 +1475,32 @@ impl eframe::App for App {
 
 // ── Help window ───────────────────────────────────────────────────────────────
 
+/// Render one body block line-by-line so egui doesn't collapse manual
+/// whitespace/indentation into a single wrapped paragraph.
+/// Lines that look like shell commands are shown in monospace green.
+fn render_help_body(ui: &mut egui::Ui, body: &str) {
+    for raw_line in body.split('\n') {
+        let line = raw_line.trim_end();
+        if line.is_empty() {
+            ui.add_space(5.0);
+        } else if line.trim_start().starts_with("cargo ")
+            || line.trim_start().starts_with("rustup ")
+            || line.trim_start().starts_with("target\\")
+            || line.trim_start().starts_with("target/")
+            || line.trim_start().starts_with("git ")
+            || line.trim_start().starts_with("python ")
+        {
+            ui.label(
+                RichText::new(line)
+                    .font(egui::FontId::monospace(12.5))
+                    .color(Color32::from_rgb(150, 220, 130)),
+            );
+        } else {
+            ui.label(line);
+        }
+    }
+}
+
 fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize) {
     if !*show {
         return;
@@ -1495,20 +1509,22 @@ fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize)
     egui::Window::new("📖  Help")
         .open(show)
         .resizable(true)
-        .collapsible(true)
-        .default_size([820.0, 560.0])
-        .min_size([560.0, 360.0])
+        .collapsible(false)
+        .default_size([860.0, 580.0])
+        .min_size([580.0, 380.0])
         .show(ctx, |ui| {
             ui.horizontal_top(|ui| {
                 // ── Left nav sidebar ─────────────────────────────────────────
                 egui::ScrollArea::vertical()
                     .id_salt("help_nav")
-                    .max_width(160.0)
+                    .max_width(170.0)
                     .show(ui, |ui| {
-                        ui.set_min_width(150.0);
+                        ui.set_min_width(160.0);
+                        ui.add_space(4.0);
                         for (i, (title, _)) in HELP_SECTIONS.iter().enumerate() {
                             let selected = *section == i;
-                            if ui.add(egui::SelectableLabel::new(selected, *title)).clicked() {
+                            let label = egui::SelectableLabel::new(selected, *title);
+                            if ui.add_sized([160.0, 28.0], label).clicked() {
                                 *section = i;
                             }
                         }
@@ -1522,24 +1538,150 @@ fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize)
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         if let Some((tab_title, sub_sections)) = HELP_SECTIONS.get(*section) {
-                            ui.heading(*tab_title);
-                            ui.add_space(6.0);
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(*tab_title).size(18.0).strong());
+                            ui.add_space(8.0);
 
                             for (heading, body) in sub_sections.iter() {
                                 ui.separator();
-                                ui.add_space(2.0);
+                                ui.add_space(6.0);
                                 ui.label(
                                     RichText::new(*heading)
+                                        .size(13.5)
                                         .strong()
                                         .color(Color32::from_rgb(140, 190, 255)),
                                 );
-                                ui.add_space(4.0);
-                                ui.label(*body);
-                                ui.add_space(8.0);
+                                ui.add_space(6.0);
+                                render_help_body(ui, body);
+                                ui.add_space(10.0);
                             }
                         }
                     });
             });
+        });
+}
+
+// ── Settings window ───────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn render_settings_window(
+    ctx: &egui::Context,
+    show: &mut bool,
+    startup_enabled: bool,
+    toast_enabled: bool,
+    hotkey_enabled: bool,
+    toggle_startup: &mut bool,
+    toggle_toast: &mut bool,
+    toggle_hotkey: &mut bool,
+) {
+    if !*show {
+        return;
+    }
+
+    egui::Window::new("⚙  Settings")
+        .open(show)
+        .resizable(false)
+        .collapsible(false)
+        .default_size([340.0, 260.0])
+        .show(ctx, |ui| {
+            ui.add_space(4.0);
+
+            // ── Startup ───────────────────────────────────────────────────────
+            ui.label(RichText::new("Startup").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let startup_label = if startup_enabled {
+                    "🚀  Start with Windows  (ON)"
+                } else {
+                    "🚀  Start with Windows  (OFF)"
+                };
+                let btn = egui::Button::new(startup_label)
+                    .fill(if startup_enabled {
+                        Color32::from_rgb(50, 90, 25)
+                    } else {
+                        Color32::from_rgb(50, 50, 50)
+                    })
+                    .min_size([300.0, 28.0].into());
+                if ui.add(btn)
+                    .on_hover_text(
+                        "Adds capture-bypass to HKCU\\Run so it launches on login.\n\
+                         Windows will show a UAC prompt each time because the app\n\
+                         requires Administrator rights.",
+                    )
+                    .clicked()
+                {
+                    *toggle_startup = true;
+                }
+            });
+            ui.add_space(12.0);
+
+            // ── Notifications ─────────────────────────────────────────────────
+            ui.label(RichText::new("Notifications").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let toast_label = if toast_enabled {
+                    "🔔  Toast notifications  (ON)"
+                } else {
+                    "🔕  Toast notifications  (OFF)"
+                };
+                let btn = egui::Button::new(toast_label)
+                    .fill(if toast_enabled {
+                        Color32::from_rgb(70, 60, 10)
+                    } else {
+                        Color32::from_rgb(50, 50, 50)
+                    })
+                    .min_size([300.0, 28.0].into());
+                if ui.add(btn)
+                    .on_hover_text(
+                        "Show a Windows desktop notification whenever auto-inject\n\
+                         silently strips a process in the background.",
+                    )
+                    .clicked()
+                {
+                    *toggle_toast = true;
+                }
+            });
+            ui.add_space(12.0);
+
+            // ── Hotkey ────────────────────────────────────────────────────────
+            ui.label(RichText::new("Hotkey").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let hk_label = if hotkey_enabled {
+                    "⌨  Ctrl+Shift+B  (ON)"
+                } else {
+                    "⌨  Ctrl+Shift+B  (OFF)"
+                };
+                let btn = egui::Button::new(hk_label)
+                    .fill(if hotkey_enabled {
+                        Color32::from_rgb(35, 35, 90)
+                    } else {
+                        Color32::from_rgb(50, 50, 50)
+                    })
+                    .min_size([300.0, 28.0].into());
+                if ui.add(btn)
+                    .on_hover_text(
+                        "Register Ctrl+Shift+B as a global hotkey.\n\
+                         Pressing it strips all protected windows, even\n\
+                         when the app is minimised to the system tray.",
+                    )
+                    .clicked()
+                {
+                    *toggle_hotkey = true;
+                }
+            });
+            ui.add_space(6.0);
+            if hotkey_enabled {
+                ui.label(
+                    RichText::new("  Global shortcut active: Ctrl+Shift+B → Strip All Protected")
+                        .size(11.0)
+                        .color(Color32::from_rgb(130, 130, 200)),
+                );
+            }
+            ui.add_space(4.0);
         });
 }
 
