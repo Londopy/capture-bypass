@@ -55,8 +55,10 @@ SolidCompression=yes
 ; Appearance
 WizardStyle=modern
 
-; Require admin so the app (which itself needs admin) can be installed system-wide
-PrivilegesRequired=admin
+; Per-user install — no UAC prompt during setup.
+; The {auto*} constants below resolve to per-user locations automatically.
+; The app itself still requests elevation at launch (required for OpenProcess).
+PrivilegesRequired=lowest
 
 ; Only install on x64 Windows (the GUI exe is x64-only)
 ArchitecturesInstallIn64BitMode=x64compatible
