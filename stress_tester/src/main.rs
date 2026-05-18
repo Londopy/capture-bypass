@@ -44,19 +44,23 @@ use std::{
 
 use windows::Win32::{
     Foundation::{BOOL, HWND, LPARAM, TRUE},
-    System::{
-        Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW,
-            Process32NextW, MODULEENTRY32W, PROCESSENTRY32W, TH32CS_SNAPMODULE,
-            TH32CS_SNAPPROCESS,
-        },
-        LibraryLoader::FreeLibrary,
+    System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW,
+        Process32NextW, MODULEENTRY32W, PROCESSENTRY32W, TH32CS_SNAPMODULE,
+        TH32CS_SNAPPROCESS,
     },
     UI::WindowsAndMessaging::{
         EnumWindows, GetWindowDisplayAffinity, GetWindowTextW, GetWindowThreadProcessId,
         IsWindowVisible, SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY,
     },
 };
+
+// FreeLibrary is always present in kernel32 — link directly rather than
+// relying on the windows crate feature gate, which omits it in 0.58.
+#[link(name = "kernel32")]
+extern "system" {
+    fn FreeLibrary(hLibModule: isize) -> i32;
+}
 
 /// HWND is a raw pointer — wrap it so it's Send across threads.
 /// SAFETY: only used on our own window from a single Win32 call per thread.
@@ -152,7 +156,7 @@ fn eject_matching_modules(pid: u32, pattern: &str, also_tmp: bool) -> u32 {
             let hit = (!pattern.is_empty() && name.contains(&pattern.to_lowercase()))
                 || (also_tmp && name.ends_with(".tmp"));
             if hit {
-                if FreeLibrary(entry.hModule).is_ok() {
+                if FreeLibrary(entry.hModule.0) != 0 {
                     ejected += 1;
                 }
             }
