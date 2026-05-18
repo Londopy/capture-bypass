@@ -54,195 +54,184 @@ const BROWSER_NAMES: &[&str] = &[
     "thorium.exe",
 ];
 
-// ── Help content (mirrors Python _WIKI) ──────────────────────────────────────
+// ── Help content ──────────────────────────────────────────────────────────────
+//
+// Structure: &[( tab_label, &[( sub_heading, body_text )] )]
+// render_help_window() turns each sub_heading into a bold label + separator,
+// so no raw ━━━ dividers needed.
 
-const HELP_SECTIONS: &[(&str, &str)] = &[
-    ("Overview", "\
-What is Capture Bypass?
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Capture Bypass removes the WDA_EXCLUDEFROMCAPTURE screen-capture protection \
-from Windows application windows, letting OBS, the Snipping Tool, and any \
-other screen-capture software record them normally.
-
-How does it work?
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Windows provides SetWindowDisplayAffinity(), which lets a process protect its \
-own windows from capture.  Because the API only works on a process's own \
-windows, bypassing it requires running code INSIDE the target process.
-
-Capture Bypass does this via classic LoadLibrary DLL injection:
-
-  1. OpenProcess          — open a handle to the target process
-  2. VirtualAllocEx       — allocate memory inside the target
-  3. WriteProcessMemory   — write the payload DLL path into that memory
-  4. CreateRemoteThread   — start a thread inside the target that calls
-                            LoadLibraryA, loading the payload DLL
-  5. The DLL's DllMain    — calls SetWindowDisplayAffinity(hwnd, WDA_NONE)
-                            for every window owned by that process
-
-Legal notice
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Only use this tool on windows and processes you own or have explicit \
-permission to capture.  See DISCLAIMER.md in the repository.
-"),
-    ("Requirements & Build", "\
-Requirements
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  • Windows 10 build 19041+ (WDA_EXCLUDEFROMCAPTURE requires 2004+)
-  • Administrator privileges  (OpenProcess on other processes requires admin)
-  • Rust + Cargo  (https://rustup.rs)
-
-Build — x64 (required)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  cargo build --release -p payload_dll -p payload_dll_persistent -p gui
-
-  Binaries land in:  target\\release\\
-
-Build — x86 (optional, for 32-bit targets)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  rustup target add i686-pc-windows-msvc
-  cargo build --release --target i686-pc-windows-msvc \\
-        -p payload_dll -p payload_dll_persistent
-
-  Binaries land in:  target\\i686-pc-windows-msvc\\release\\
-
-  32-bit processes are shown with an orange \"32\" badge.
-"),
-    ("Usage Guide", "\
-Window list
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The list shows every visible, titled window with:
-
-  PID        Process ID
-  Process    Executable name  (orange \"32\" badge = 32-bit process)
-  Title      Window title
-  Status     Live protection state, refreshed every 500 ms:
-               PROTECTED  — WDA_EXCLUDEFROMCAPTURE
-               MONITOR    — WDA_MONITOR
-               OK         — WDA_NONE (capturable)
-  Action     \"Strip Protection\" button for that row
-
-Header buttons
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ⟳ Refresh              Re-enumerate all windows and update status badges.
-
-  ⚡ Strip All Protected  One click injects into every currently-protected PID.
-                          Deduplicates so each process is only injected once.
-
-  Mode toggle            Switch between injection modes (see Injection Modes).
-
-  📖 Help                Opens this panel.
-
-Filter bar
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Live search by window title, process name, or PID.  Click ✕ to clear.
-  \"Protected only\" checkbox hides unprotected windows.
-
-  🤖 Auto-inject         Background thread strips newly-protected windows
-                          automatically.  Runs while app is minimised to tray.
-
-Status bar
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Shows last action result and timestamp.
-  Green = success   Red = error   Gray = neutral
-"),
-    ("Injection Modes", "\
-⚡ One-shot mode  (default)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The payload DLL strips WDA protection once and exits.  Fast and lightweight.
-
-Use when:  the target app sets protection only once at startup and never
-           re-applies it.
-
-🔁 Persistent mode
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The payload DLL stays alive inside the target process and re-applies
-WDA_NONE every 500 ms for the entire lifetime of the process.
-
-Use when:  the target app calls SetWindowDisplayAffinity on a timer to
-           fight back against one-shot injection (e.g. DRM video players).
-
-Re-injection
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Windows caches loaded DLLs by file path — if the same DLL path is already
-loaded in a process, LoadLibraryA silently no-ops.  Inject again if the
-status badge shows PROTECTED after a previous strip.
-"),
-    ("Browser Injection", "\
-Why browsers need special handling
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Chrome, Edge, Firefox, Brave, Opera, Vivaldi, and Thorium use a multi-process
-architecture.  DRM-protected video is rendered in a separate child (renderer)
-process that owns its own windows.  Injecting only into the main PID won't
-strip the video window.
-
-What Capture Bypass does
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-When you click \"Strip Protection\" on a browser row, the app automatically:
-
-  1. Injects the payload into the main (browser) PID
-  2. Enumerates all child processes via CreateToolhelp32Snapshot
-  3. Injects into every child PID as well
-
-Tip
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-If a browser re-applies protection after navigating to a new video, hit
-⚡ Strip All Protected again, or enable 🤖 Auto-inject.
-"),
-    ("System Tray & Auto-inject", "\
-System tray
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Clicking the window's ✕ close button hides the app to the system tray
-instead of quitting — the icon remains in the notification area.
-
-Tray icon right-click menu:
-  Open    — restore the main window
-  Quit    — fully exit the application
-
-Auto-inject
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Enable the \"🤖 Auto-inject\" toggle in the toolbar.
-
-A background thread polls GetWindowDisplayAffinity every 500 ms.
-Any window that becomes protected and hasn't been seen before is
-automatically injected.
-
-Designed for streamers: enable auto-inject, minimise to tray, and any
-app that tries to block capture is handled silently.
-"),
-    ("Troubleshooting", "\
-DLLs not found
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The Rust payload DLLs haven't been built yet.  Run:
-  cargo build --release -p payload_dll -p payload_dll_persistent
-
-\"Strip failed — try Administrator\"
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OpenProcess requires SeDebugPrivilege for processes not owned by your
-user session.  Right-click your terminal → Run as administrator.
-
-Injection succeeds but window is still black in OBS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  1. Wait for the next 500 ms refresh — if status is now OK, OBS may
-     need to refresh its capture source (remove and re-add it).
-  2. For browsers, click Strip Protection again — it injects children too.
-  3. Some apps re-apply protection on a timer.  Switch to 🔁 Persistent
-     mode and inject again.
-
-Antivirus flags the DLL
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DLL injection is used by both legitimate tools and malware, so heuristic
-scanners may flag payload_dll.dll.  Inspect payload_dll/src/lib.rs —
-it only calls SetWindowDisplayAffinity.  Add an exclusion for target/ in
-your AV settings.
-
-x86 injection fails even with x86 binaries present
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-A 64-bit process cannot inject into a 32-bit process and vice-versa.
-Make sure you built the x86 target:
-  rustup target add i686-pc-windows-msvc
-  cargo build --release --target i686-pc-windows-msvc -p payload_dll
-"),
+const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
+    ("Overview", &[
+        ("What is Capture Bypass?",
+            "Capture Bypass removes the WDA_EXCLUDEFROMCAPTURE screen-capture \
+             protection from Windows application windows, letting OBS, the \
+             Snipping Tool, and any other screen-capture software record them \
+             normally."),
+        ("How does it work?",
+            "Windows provides SetWindowDisplayAffinity(), which lets a process \
+             protect its own windows from capture.  Because the API only works \
+             on a process's own windows, bypassing it requires running code \
+             INSIDE the target process.\n\
+             \n\
+             Capture Bypass does this via DLL injection:\n\
+             \n\
+             1. OpenProcess        — open a handle to the target process\n\
+             2. VirtualAllocEx     — allocate memory inside the target\n\
+             3. WriteProcessMemory — write the payload DLL path into that memory\n\
+             4. CreateRemoteThread — start a thread inside the target that calls\n\
+                                     LoadLibraryA, loading the payload DLL\n\
+             5. The DLL's DllMain  — calls SetWindowDisplayAffinity(hwnd, WDA_NONE)\n\
+                                     for every window owned by that process"),
+        ("Legal notice",
+            "Only use this tool on windows and processes you own or have \
+             explicit permission to capture.  See DISCLAIMER.md in the \
+             repository for the full legal disclaimer."),
+    ]),
+    ("Requirements & Build", &[
+        ("Requirements",
+            "• Windows 10 build 19041+  (WDA_EXCLUDEFROMCAPTURE requires 2004+)\n\
+             • Administrator privileges  (OpenProcess on other processes requires admin)\n\
+             • Rust + Cargo  (https://rustup.rs)"),
+        ("Build — x64 (required)",
+            "cargo build --release -p payload_dll -p payload_dll_persistent -p gui\n\
+             \n\
+             Binaries land in:  target\\release\\"),
+        ("Build — x86 (optional, for 32-bit targets)",
+            "rustup target add i686-pc-windows-msvc\n\
+             cargo build --release --target i686-pc-windows-msvc \\\n\
+                   -p payload_dll -p payload_dll_persistent\n\
+             \n\
+             Binaries land in:  target\\i686-pc-windows-msvc\\release\\\n\
+             \n\
+             32-bit processes are shown with an orange \"32\" badge in the table."),
+    ]),
+    ("Usage Guide", &[
+        ("Window list",
+            "The table shows every visible, titled window with:\n\
+             \n\
+             PID      — Process ID\n\
+             Process  — Executable name  (orange \"32\" badge = 32-bit process)\n\
+             Title    — Window title\n\
+             Status   — Live protection state, refreshed every 500 ms:\n\
+                          PROTECTED = WDA_EXCLUDEFROMCAPTURE\n\
+                          MONITOR   = WDA_MONITOR\n\
+                          OK        = WDA_NONE (capturable)\n\
+             Action   — \"Strip Protection\" button for that row"),
+        ("Header buttons",
+            "⟳ Refresh             Re-enumerate all windows and update status badges.\n\
+             \n\
+             ⚡ Strip All Protected One click injects into every currently-protected PID.\n\
+                                    Deduplicates so each process is only injected once.\n\
+             \n\
+             Mode toggle           Switch between One-shot and Persistent injection modes.\n\
+             \n\
+             🔨 Stress Test        Launch stress_tester.exe to simulate a protected window.\n\
+             \n\
+             📖 Help               Opens this window."),
+        ("Filter bar",
+            "Type to search live by window title, process name, or PID.  Click ✕ to clear.\n\
+             \n\
+             \"Protected only\" checkbox hides all unprotected windows.\n\
+             \n\
+             🤖 Auto-inject — background thread strips newly-protected windows \
+             automatically.  Continues running while the app is minimised to tray.\n\
+             \n\
+             🚀 Start with Windows — writes a registry Run entry so the app launches \
+             on login.  A UAC prompt will appear each time due to the admin manifest."),
+        ("Status bar",
+            "Shows the last action result and how long ago it occurred.\n\
+             Green = success     Red = error     Gray = neutral / informational"),
+    ]),
+    ("Injection Modes", &[
+        ("⚡ One-shot mode (default)",
+            "The payload DLL strips WDA protection once and exits.  \
+             Fast and lightweight.\n\
+             \n\
+             Use when: the target app sets protection only once at startup \
+             and never re-applies it."),
+        ("🔁 Persistent mode",
+            "The payload DLL stays alive inside the target process and \
+             re-applies WDA_NONE every 500 ms for the entire lifetime of \
+             the process.\n\
+             \n\
+             Use when: the target app calls SetWindowDisplayAffinity on a \
+             timer to fight back against one-shot injection (e.g. DRM video \
+             players)."),
+        ("Re-injection & re-protection",
+            "Windows caches loaded DLLs by file path — if the same DLL path \
+             is already loaded in a process, LoadLibraryA silently no-ops.\n\
+             \n\
+             If a one-shot strip appears to succeed but the status badge \
+             returns to PROTECTED shortly after, the app is re-applying \
+             protection on a timer.  Switch to 🔁 Persistent mode — a popup \
+             will also appear automatically when this is detected."),
+    ]),
+    ("Browser Injection", &[
+        ("Why browsers need special handling",
+            "Chrome, Edge, Firefox, Brave, Opera, Vivaldi, and Thorium use a \
+             multi-process architecture.  DRM-protected video is rendered in a \
+             separate child (renderer) process that owns its own windows.  \
+             Injecting only into the main PID won't strip the video window."),
+        ("What Capture Bypass does",
+            "When you click \"Strip Protection\" on a browser row, the app \
+             automatically:\n\
+             \n\
+             1. Injects the payload into the main (browser) PID\n\
+             2. Enumerates all child processes via CreateToolhelp32Snapshot\n\
+             3. Injects into every child PID as well"),
+        ("Tip",
+            "If a browser re-applies protection after navigating to a new \
+             video, click ⚡ Strip All Protected again, or enable \
+             🤖 Auto-inject so it's handled automatically."),
+    ]),
+    ("System Tray & Auto-inject", &[
+        ("System tray",
+            "Clicking the window's ✕ close button hides the app to the system \
+             tray instead of quitting — the icon remains in the notification area.\n\
+             \n\
+             Tray icon right-click menu:\n\
+               Open  — restore the main window\n\
+               Quit  — fully exit the application"),
+        ("Auto-inject",
+            "Enable the 🤖 Auto-inject toggle in the toolbar.\n\
+             \n\
+             A background thread polls GetWindowDisplayAffinity every 500 ms. \
+             Any window that becomes protected and hasn't been seen before is \
+             automatically stripped.\n\
+             \n\
+             Designed for streamers: enable auto-inject, minimise to tray, and \
+             any app that tries to block capture is handled silently in the \
+             background."),
+    ]),
+    ("Troubleshooting", &[
+        ("DLLs not found",
+            "The payload DLLs haven't been built yet.  Run:\n\
+             \n\
+             cargo build --release -p payload_dll -p payload_dll_persistent"),
+        ("\"Strip failed\" / access denied",
+            "OpenProcess requires elevated privileges for processes not owned \
+             by your session.  Make sure capture_bypass_gui.exe is running as \
+             Administrator (the UAC prompt appears on launch)."),
+        ("Injection succeeds but window is still black in OBS",
+            "1. Wait for the next 500 ms refresh — if the status badge shows OK, \
+             OBS may need its capture source refreshed (remove and re-add it).\n\
+             2. For browsers, click Strip Protection again — it re-injects \
+             child processes too.\n\
+             3. If the badge keeps flipping back to PROTECTED, the app is \
+             fighting back on a timer.  Switch to 🔁 Persistent mode."),
+        ("Antivirus flags the DLL",
+            "DLL injection is used by both legitimate tools and malware, so \
+             heuristic scanners may flag the payload.  Inspect \
+             payload_dll/src/lib.rs — it only calls SetWindowDisplayAffinity.\n\
+             \n\
+             Add an exclusion for the target\\ directory in your AV settings."),
+        ("x86 injection fails even with x86 binaries present",
+            "A 64-bit process cannot inject into a 32-bit process and \
+             vice-versa.  Verify you built the x86 target:\n\
+             \n\
+             rustup target add i686-pc-windows-msvc\n\
+             cargo build --release --target i686-pc-windows-msvc -p payload_dll"),
+    ]),
 ];
 
 // ── Data model ────────────────────────────────────────────────────────────────
@@ -619,15 +608,8 @@ impl eframe::App for App {
             })
             .collect();
 
-        // ── Help side panel ──────────────────────────────────────────────────
-        if self.show_help {
-            egui::SidePanel::right("help_panel")
-                .min_width(340.0)
-                .max_width(480.0)
-                .show(ctx, |ui| {
-                    render_help_panel(ui, &mut self.show_help, &mut self.help_section);
-                });
-        }
+        // ── Help window ──────────────────────────────────────────────────────
+        render_help_window(ctx, &mut self.show_help, &mut self.help_section);
 
         // ── Top bar ──────────────────────────────────────────────────────────
         // Collect actions here to avoid borrow conflicts
@@ -1043,47 +1025,62 @@ impl eframe::App for App {
     }
 }
 
-// ── Help panel renderer ───────────────────────────────────────────────────────
+// ── Help window ───────────────────────────────────────────────────────────────
 
-fn render_help_panel(ui: &mut Ui, show: &mut bool, section: &mut usize) {
-    ui.horizontal(|ui| {
-        ui.heading("📖 Help");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("✕").clicked() {
-                *show = false;
-            }
-        });
-    });
-    ui.separator();
+fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize) {
+    if !*show {
+        return;
+    }
 
-    ui.horizontal_top(|ui| {
-        // Sidebar navigation
-        ui.vertical(|ui| {
-            ui.set_min_width(130.0);
-            for (i, (title, _)) in HELP_SECTIONS.iter().enumerate() {
-                let selected = *section == i;
-                let btn = egui::SelectableLabel::new(selected, *title);
-                if ui.add(btn).clicked() {
-                    *section = i;
-                }
-            }
-        });
-
-        ui.separator();
-
-        // Content
-        ui.vertical(|ui| {
-            if let Some((title, content)) = HELP_SECTIONS.get(*section) {
-                ui.strong(*title);
-                ui.add_space(6.0);
+    egui::Window::new("📖  Help")
+        .open(show)
+        .resizable(true)
+        .collapsible(true)
+        .default_size([820.0, 560.0])
+        .min_size([560.0, 360.0])
+        .show(ctx, |ui| {
+            ui.horizontal_top(|ui| {
+                // ── Left nav sidebar ─────────────────────────────────────────
                 egui::ScrollArea::vertical()
+                    .id_salt("help_nav")
+                    .max_width(160.0)
+                    .show(ui, |ui| {
+                        ui.set_min_width(150.0);
+                        for (i, (title, _)) in HELP_SECTIONS.iter().enumerate() {
+                            let selected = *section == i;
+                            if ui.add(egui::SelectableLabel::new(selected, *title)).clicked() {
+                                *section = i;
+                            }
+                        }
+                    });
+
+                ui.separator();
+
+                // ── Right content area ───────────────────────────────────────
+                egui::ScrollArea::vertical()
+                    .id_salt("help_content")
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
-                        ui.label(*content);
+                        if let Some((tab_title, sub_sections)) = HELP_SECTIONS.get(*section) {
+                            ui.heading(*tab_title);
+                            ui.add_space(6.0);
+
+                            for (heading, body) in sub_sections.iter() {
+                                ui.separator();
+                                ui.add_space(2.0);
+                                ui.label(
+                                    RichText::new(*heading)
+                                        .strong()
+                                        .color(Color32::from_rgb(140, 190, 255)),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(*body);
+                                ui.add_space(8.0);
+                            }
+                        }
                     });
-            }
+            });
         });
-    });
 }
 
 // ── Status badge ──────────────────────────────────────────────────────────────

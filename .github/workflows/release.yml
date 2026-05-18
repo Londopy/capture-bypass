@@ -56,7 +56,6 @@ jobs:
             -p cli
 
       # ── 6. Package: standalone Rust GUI bundle ───────────────────────────────
-      #   Users just unzip and double-click capture_bypass_gui.exe — no Python needed.
       #   x86 payload DLLs land in x86\ so the GUI finds them automatically.
       - name: Package GUI bundle
         shell: pwsh
@@ -76,35 +75,7 @@ jobs:
           Compress-Archive -Path "$out\*" `
             -DestinationPath "capture-bypass-gui-${{ github.ref_name }}-x64.zip"
 
-      # ── 7. Package: Python frontend bundle ───────────────────────────────────
-      #   Preserves the target/ folder layout that app.py expects at runtime.
-      - name: Package Python frontend bundle
-        shell: pwsh
-        run: |
-          $root = "dist\python-frontend"
-
-          # app entry-point
-          New-Item -ItemType Directory -Path $root -Force | Out-Null
-          Copy-Item "frontend\app.py" "$root\"
-
-          # x64 binaries — app.py looks for these in target\release\
-          $r64 = "$root\target\release"
-          New-Item -ItemType Directory -Path $r64 -Force | Out-Null
-          Copy-Item "target\release\cli.exe"                   "$r64\"
-          Copy-Item "target\release\payload_dll.dll"           "$r64\"
-          Copy-Item "target\release\payload_dll_persistent.dll" "$r64\"
-
-          # x86 binaries — app.py picks these up automatically for 32-bit targets
-          $r86 = "$root\target\i686-pc-windows-msvc\release"
-          New-Item -ItemType Directory -Path $r86 -Force | Out-Null
-          Copy-Item "target\i686-pc-windows-msvc\release\cli.exe"                   "$r86\"
-          Copy-Item "target\i686-pc-windows-msvc\release\payload_dll.dll"           "$r86\"
-          Copy-Item "target\i686-pc-windows-msvc\release\payload_dll_persistent.dll" "$r86\"
-
-          Compress-Archive -Path "$root\*" `
-            -DestinationPath "capture-bypass-python-${{ github.ref_name }}.zip"
-
-      # ── 8. Build Windows installer with Inno Setup ──────────────────────────
+      # ── 7. Build Windows installer with Inno Setup ──────────────────────────
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
@@ -123,5 +94,4 @@ jobs:
           generate_release_notes: true   # auto-fills body from commit messages
           files: |
             capture-bypass-gui-${{ github.ref_name }}-x64.zip
-            capture-bypass-python-${{ github.ref_name }}.zip
             dist/capture-bypass-setup-*-x64.exe
