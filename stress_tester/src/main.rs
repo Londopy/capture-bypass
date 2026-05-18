@@ -59,7 +59,7 @@ use windows::Win32::{
 // relying on the windows crate feature gate, which omits it in 0.58.
 #[link(name = "kernel32")]
 extern "system" {
-    fn FreeLibrary(hLibModule: isize) -> i32;
+    fn FreeLibrary(hLibModule: *mut core::ffi::c_void) -> i32;
 }
 
 /// HWND is a raw pointer — wrap it so it's Send across threads.
