@@ -806,9 +806,14 @@ impl eframe::App for App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             } else if Some(&event.id) == self.tray_quit_id.as_ref() {
-                self.quit_requested = true;
+                // The main window may be hidden (Visible(false)) when Quit is
+                // clicked.  egui stops processing ViewportCommands on hidden
+                // viewports, so ViewportCommand::Close is never drained.
+                // Save config and exit the process directly — the OS cleans up
+                // the tray icon automatically when the process dies.
                 self.stop_auto_inject();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.persist();
+                std::process::exit(0);
             }
         }
 
