@@ -1510,67 +1510,60 @@ fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize)
         .open(show)
         .resizable(true)
         .collapsible(false)
-        .default_size([780.0, 560.0])
-        .min_size([540.0, 360.0])
-        .max_size([1400.0, 1000.0])
+        .default_size([720.0, 540.0])
+        .min_size([480.0, 340.0])
         .show(ctx, |ui| {
-            // Capture the full available width BEFORE entering any inner layout
-            // so we can constrain the content scroll area and prevent labels
-            // from expanding the window horizontally past its set size.
-            let total_w = ui.available_width();
-            let nav_w = 170.0_f32;
-            let sep_w = 8.0_f32; // approximate separator + spacing
-            let content_w = (total_w - nav_w - sep_w).max(200.0);
-
-            ui.horizontal_top(|ui| {
-                // ── Left nav sidebar ─────────────────────────────────────────
-                egui::ScrollArea::vertical()
-                    .id_salt("help_nav")
-                    .max_width(nav_w)
-                    .show(ui, |ui| {
-                        ui.set_min_width(nav_w - 10.0);
-                        ui.add_space(4.0);
-                        for (i, (title, _)) in HELP_SECTIONS.iter().enumerate() {
-                            let selected = *section == i;
-                            let label = egui::SelectableLabel::new(selected, *title);
-                            if ui.add_sized([nav_w - 10.0, 28.0], label).clicked() {
-                                *section = i;
-                            }
-                        }
-                    });
-
-                ui.separator();
-
-                // ── Right content area ───────────────────────────────────────
-                egui::ScrollArea::vertical()
-                    .id_salt("help_content")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        // Hard-cap width so labels wrap instead of
-                        // pushing the window wider than its set size.
-                        ui.set_max_width(content_w);
-
-                        if let Some((tab_title, sub_sections)) = HELP_SECTIONS.get(*section) {
-                            ui.add_space(4.0);
-                            ui.label(RichText::new(*tab_title).size(18.0).strong());
-                            ui.add_space(8.0);
-
-                            for (heading, body) in sub_sections.iter() {
-                                ui.separator();
-                                ui.add_space(6.0);
-                                ui.label(
-                                    RichText::new(*heading)
-                                        .size(13.5)
-                                        .strong()
-                                        .color(Color32::from_rgb(140, 190, 255)),
-                                );
-                                ui.add_space(6.0);
-                                render_help_body(ui, body);
-                                ui.add_space(10.0);
-                            }
-                        }
-                    });
+            // ── Tab bar ──────────────────────────────────────────────────────
+            // Wraps automatically on narrow windows — no sidebar, no
+            // horizontal_top, so the window never expands sideways.
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(2.0);
+                for (i, (title, _)) in HELP_SECTIONS.iter().enumerate() {
+                    let selected = *section == i;
+                    let btn = egui::Button::new(*title)
+                        .fill(if selected {
+                            Color32::from_rgb(40, 80, 130)
+                        } else {
+                            Color32::from_rgb(35, 35, 35)
+                        });
+                    if ui
+                        .add(btn)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        *section = i;
+                    }
+                }
             });
+
+            ui.separator();
+
+            // ── Content area — full width, vertically scrollable ─────────────
+            egui::ScrollArea::vertical()
+                .id_salt("help_content")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if let Some((tab_title, sub_sections)) = HELP_SECTIONS.get(*section) {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(*tab_title).size(18.0).strong());
+                        ui.add_space(8.0);
+
+                        for (heading, body) in sub_sections.iter() {
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new(*heading)
+                                    .size(13.5)
+                                    .strong()
+                                    .color(Color32::from_rgb(140, 190, 255)),
+                            );
+                            ui.add_space(6.0);
+                            render_help_body(ui, body);
+                            ui.add_space(10.0);
+                        }
+                    }
+                });
         });
 }
 

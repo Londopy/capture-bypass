@@ -1,11 +1,16 @@
 ; ─────────────────────────────────────────────────────────────────────────────
 ; capture-bypass  —  Inno Setup 6 installer script
 ;
-; Build manually (from the repo root, after `cargo build --release`):
-;   iscc installer\capture-bypass.iss
+; !! IMPORTANT — use the SAME version in both steps below !!
 ;
-; Override the version string on the command line:
-;   iscc /DMyAppVersion=3.4.1 installer\capture-bypass.iss
+; Step 1 — build the exe with the version baked in (from the repo root):
+;   set APP_VERSION=3.4.11 && cargo build --release -p gui -p stress_tester -p payload_dll -p payload_dll_persistent
+;
+;   APP_VERSION is read by gui\build.rs and overrides CARGO_PKG_VERSION inside
+;   the exe, so the built-in update check always reports the correct version.
+;
+; Step 2 — compile the installer (same version string):
+;   iscc /DMyAppVersion=3.4.11 installer\capture-bypass.iss
 ;
 ; Output lands in:  dist\capture-bypass-setup-<version>-x64.exe
 ; ─────────────────────────────────────────────────────────────────────────────
