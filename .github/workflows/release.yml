@@ -39,7 +39,9 @@ jobs:
 
       # ── 4. Build x64 (GUI + CLI + stress tester + both payload DLLs) ─────────
       - name: Build x64
+        shell: pwsh
         run: |
+          $env:APP_VERSION = "${{ github.ref_name }}".TrimStart('v')
           cargo build --release `
             -p payload_dll `
             -p payload_dll_persistent `
