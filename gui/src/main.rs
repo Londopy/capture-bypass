@@ -13,7 +13,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
-        Arc, Mutex,
+        Arc, Condvar, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -40,10 +40,14 @@ use windows::Win32::{
         Input::KeyboardAndMouse::{
             HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, UnregisterHotKey,
         },
+        Accessibility::{
+            SetWinEventHook, HWINEVENTHOOK, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+        },
         WindowsAndMessaging::{
-            EnumWindows, GetIconInfo, GetWindowDisplayAffinity, GetWindowTextW,
-            GetWindowThreadProcessId, ICONINFO, IsWindowVisible, MSG, PeekMessageW,
-            PM_REMOVE, WM_HOTKEY,
+            DispatchMessageW, EnumWindows, GetIconInfo, GetMessageW,
+            GetWindowDisplayAffinity, GetWindowTextW, GetWindowThreadProcessId,
+            ICONINFO, IsWindowVisible, MSG, PeekMessageW, PM_REMOVE,
+            TranslateMessage, WM_HOTKEY,
         },
     },
 };
@@ -63,6 +67,49 @@ const BROWSER_NAMES: &[&str] = &[
     "vivaldi.exe",
     "thorium.exe",
 ];
+
+// ── WinEvent hook — instant window detection ───────────────────────────────
+//
+// A background thread installs a system-wide WINEVENT_OUTOFCONTEXT hook that
+// fires whenever any window becomes visible (EVENT_OBJECT_SHOW).  The callback
+// signals a global Condvar so both the display scan thread and the auto-inject
+// thread wake up immediately instead of waiting for their next poll interval.
+//
+// Without this, detection latency is 0–500 ms (or 0–800 ms for auto-inject).
+// With this, it drops to roughly 0–50 ms worst case.
+
+/// Shared waker: the WinEvent callback notifies this; scan threads wait on it.
+/// Initialised lazily on first use; valid for the entire process lifetime.
+static SCAN_WAKER: OnceLock<(Mutex<()>, Condvar)> = OnceLock::new();
+
+/// Returns (or creates) the global scan waker.
+#[inline]
+fn scan_waker() -> &'static (Mutex<()>, Condvar) {
+    SCAN_WAKER.get_or_init(|| (Mutex::new(()), Condvar::new()))
+}
+
+/// WinEvent callback — fires in the hook thread's message pump whenever a
+/// window-level SHOW event occurs in any process (WINEVENT_OUTOFCONTEXT).
+unsafe extern "system" fn winevent_proc(
+    _hook:         HWINEVENTHOOK,
+    _event:        u32,
+    hwnd:          HWND,
+    id_object:     i32,
+    _id_child:     i32,
+    _event_thread: u32,
+    _event_time:   u32,
+) {
+    // id_object == 0 is OBJID_WINDOW — the window itself, not a child control.
+    // hwnd must be non-null.  Filtering here avoids waking scan threads for
+    // tooltip, menu, and other noise events.
+    if hwnd.0 == 0 || id_object != 0 { return; }
+
+    if let Some((lock, cvar)) = SCAN_WAKER.get() {
+        // We only need to signal — the content of the mutex is unused.
+        let _guard = lock.lock().unwrap();
+        cvar.notify_all();
+    }
+}
 
 // Per-process rule types
 
@@ -380,6 +427,22 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             "Enable logging to write every injection attempt (timestamp, PID, \
              process name, result) to a persistent log file alongside the \
              executable.  Useful for debugging or keeping an audit trail."),
+        ("Add Defender Exclusion",
+            "Click the 🛡 Add Defender Exclusion button to whitelist the \
+             capture-bypass folder and the GUI executable in Windows Defender \
+             / Microsoft Defender Antivirus.\n\
+             \n\
+             Internally runs:\n\
+               Add-MpPreference -ExclusionPath <install folder>\n\
+               Add-MpPreference -ExclusionProcess capture_bypass_gui.exe\n\
+             \n\
+             No additional elevation is needed — the app already runs as \
+             Administrator.  The button is safe to click multiple times; \
+             Windows Defender ignores duplicate exclusion entries.\n\
+             \n\
+             Use this when Defender flags payload_dll.dll or \
+             payload_dll_persistent.dll as suspicious.  This is a false \
+             positive caused by the DLL injection technique, not malware."),
     ]),
     ("Per-Process Rules & Exclusions", &[
         ("Per-process rules",
@@ -420,9 +483,18 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
              and never re-applies it.  Also suitable for most browsers and \
              standard media players."),
         ("🔁 Persistent mode",
-            "The payload DLL stays alive inside the target process and \
-             re-applies WDA_NONE every 500 ms for the entire lifetime of \
-             the process.\n\
+            "The payload DLL stays alive inside the target process and uses \
+             two layers to keep protection cleared:\n\
+             \n\
+             1. IAT hook — patches SetWindowDisplayAffinity in the host \
+             module's Import Address Table so the call is intercepted at \
+             the source.  Every subsequent call via a static import lands in \
+             our detour, which forces WDA_NONE instantly with zero latency.\n\
+             \n\
+             2. Polling fallback — a background thread still calls \
+             SetWindowDisplayAffinity(WDA_NONE) every 5 s as a safety net for \
+             windows that were already protected at inject time and for apps \
+             that resolve the function dynamically via GetProcAddress.\n\
              \n\
              Use when: the target app calls SetWindowDisplayAffinity on a \
              timer to fight back against one-shot injection (e.g. DRM video \
@@ -479,9 +551,11 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("Auto-inject",
             "Enable the 🤖 Auto-inject toggle in the toolbar.\n\
              \n\
-             A background thread polls GetWindowDisplayAffinity every 500 ms \
-             (or ~100 ms with Fast Scan enabled).  Any window that becomes \
-             protected and hasn't already been handled is automatically stripped.\n\
+             A background thread watches for newly-protected windows using a \
+             system-wide WinEvent hook (EVENT_OBJECT_SHOW).  When the hook fires, \
+             the thread wakes immediately — typical detection latency is < 50 ms. \
+             The normal 500 ms (or 100 ms Fast Scan) poll interval acts as a \
+             safety net for edge cases the hook might miss.\n\
              \n\
              Per-process rules and the exclusion list are respected — processes \
              set to Skip or in the exclusion list are never auto-injected.\n\
@@ -797,18 +871,27 @@ impl App {
 
         let fast_scan_arc_local: Arc<AtomicBool> = Arc::new(AtomicBool::new(cfg.fast_scan));
 
-        // Kick off background refresh thread (500 ms interval, or 100ms in fast scan)
+        // Kick off background refresh thread.
+        // Normal cadence: 500 ms (or 100 ms in fast-scan mode).
+        // When the WinEvent hook fires (new window appears), the Condvar is
+        // notified and the thread wakes immediately instead of waiting out
+        // the full interval — reducing detection latency to ~0 ms.
         {
             let shared = Arc::clone(&shared_windows);
             let ctx = cc.egui_ctx.clone();
             let fast_scan_flag = Arc::clone(&fast_scan_arc_local);
-            std::thread::spawn(move || loop {
-                let windows = enumerate_windows();
-                *shared.lock().unwrap() = windows;
-                ctx.request_repaint();
-                let sleep_ms = if fast_scan_flag.load(Ordering::Relaxed) { 100 } else { 500 };
-                std::thread::sleep(Duration::from_millis(sleep_ms));
-            });
+            std::thread::Builder::new()
+                .name("window-scan".into())
+                .spawn(move || loop {
+                    let windows = enumerate_windows();
+                    *shared.lock().unwrap() = windows;
+                    ctx.request_repaint();
+                    let sleep_ms = if fast_scan_flag.load(Ordering::Relaxed) { 100 } else { 500 };
+                    let (lock, cvar) = scan_waker();
+                    let guard = lock.lock().unwrap();
+                    let _ = cvar.wait_timeout(guard, Duration::from_millis(sleep_ms));
+                })
+                .ok();
         }
 
         let (inject_tx, inject_rx) = mpsc::channel();
@@ -861,6 +944,51 @@ impl App {
                 }
             });
         }
+
+        // ── WinEvent hook thread ──────────────────────────────────────────
+        // Installs a system-wide EVENT_OBJECT_SHOW hook and runs a Win32
+        // message pump so the hook callbacks can fire.  The callback wakes
+        // the scan/auto-inject threads instantly when a new window appears.
+        // We use WINEVENT_OUTOFCONTEXT so no DLL injection is needed — the
+        // callback runs in this process's thread, not the target's.
+        std::thread::Builder::new()
+            .name("winevent-hook".into())
+            .spawn(move || unsafe {
+                // Initialise the global waker before installing the hook so
+                // the callback can safely call SCAN_WAKER.get() at any time.
+                scan_waker();
+
+                const EVENT_OBJECT_SHOW: u32 = 0x8002;
+
+                let hook = SetWinEventHook(
+                    EVENT_OBJECT_SHOW,
+                    EVENT_OBJECT_SHOW,
+                    None, // no DLL needed with OUTOFCONTEXT
+                    Some(winevent_proc),
+                    0,    // all processes
+                    0,    // all threads
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                );
+
+                // Run a blocking message loop so callbacks can be dispatched.
+                let mut msg = MSG::default();
+                loop {
+                    match GetMessageW(&mut msg, None, 0, 0).0 {
+                        0 | -1 => break,
+                        _ => {
+                            let _ = TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+                    }
+                }
+
+                // Unreachable in normal operation, but clean up properly.
+                if !hook.is_invalid() {
+                    use windows::Win32::UI::Accessibility::UnhookWinEvent;
+                    UnhookWinEvent(hook);
+                }
+            })
+            .ok(); // non-critical — polling still works if spawn fails
 
         let auto_inject_rules_arc = Arc::new(Mutex::new(cfg.process_rules.clone()));
         let auto_inject_exclusions_arc = Arc::new(Mutex::new(cfg.exclusions.clone()));
@@ -1172,8 +1300,13 @@ impl App {
             let mut state: HashMap<u32, (String, bool, bool)> = HashMap::new();
 
             while running.load(Ordering::Relaxed) {
+                // Wait for the next poll interval OR an immediate WinEvent
+                // wake-up, whichever comes first.  This makes auto-inject
+                // react to new windows in ~0 ms instead of up to 800 ms.
                 let sleep_ms = if fast_scan { 100 } else { 800 };
-                std::thread::sleep(Duration::from_millis(sleep_ms));
+                let (lock, cvar) = scan_waker();
+                let guard = lock.lock().unwrap();
+                let _ = cvar.wait_timeout(guard, Duration::from_millis(sleep_ms));
 
                 let windows = enumerate_windows();
 
@@ -1661,6 +1794,7 @@ impl eframe::App for App {
         let mut remove_process_rule: Option<usize>    = None;
         let mut add_exclusion                         = false;
         let mut remove_exclusion: Option<usize>       = None;
+        let mut do_defender_exclusion                 = false;
         render_settings_window(
             ctx,
             &mut self.show_settings,
@@ -1698,7 +1832,32 @@ impl eframe::App for App {
             &mut remove_process_rule,
             &mut add_exclusion,
             &mut remove_exclusion,
+            &mut do_defender_exclusion,
         );
+
+        // Defender exclusion — spawn background thread so the PowerShell
+        // startup latency doesn't hitch the UI.  Result is reported via the
+        // existing injection log channel (same pattern as auto-update).
+        if do_defender_exclusion {
+            let exe_dir = self.exe_dir.clone();
+            let tx      = self.inject_tx.clone();
+            std::thread::spawn(move || {
+                match add_defender_exclusion(&exe_dir) {
+                    Ok(()) => {
+                        let _ = tx.send(InjResult {
+                            msg: "🛡 Windows Defender: exclusion added for this folder and exe.".to_string(),
+                            ok:  true,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(InjResult {
+                            msg: format!("🛡 Defender exclusion failed: {e}"),
+                            ok:  false,
+                        });
+                    }
+                }
+            });
+        }
 
         // Update confirmation dialog
         // Rendered as a floating Window before the header panel so it
@@ -2546,8 +2705,9 @@ impl eframe::App for App {
                     ui.label(
                         RichText::new(
                             "✅  Fix: switch to 🔁 Persistent mode.\n\
-                             The persistent DLL stays loaded and re-strips every 500 ms,\n\
-                             fighting back automatically whenever protection is re-applied.",
+                             The persistent DLL hooks SetWindowDisplayAffinity at the call site\n\
+                             (IAT hook) so protection can never be re-applied via a static import.\n\
+                             A 5 s polling fallback handles dynamic callers as a safety net.",
                         )
                         .strong(),
                     );
@@ -2732,6 +2892,7 @@ fn render_settings_window(
     remove_process_rule: &mut Option<usize>,
     add_exclusion: &mut bool,
     remove_exclusion: &mut Option<usize>,
+    do_defender_exclusion: &mut bool,
 ) {
     if !*show {
         return;
@@ -2794,6 +2955,38 @@ fn render_settings_window(
                     *toggle_strip_on_launch = true;
                 }
             });
+            ui.add_space(12.0);
+
+            // Windows Defender
+            ui.label(RichText::new("Windows Defender").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let btn = egui::Button::new("🛡  Add Defender Exclusion")
+                    .fill(Color32::from_rgb(30, 55, 110))
+                    .min_size([300.0, 28.0].into());
+                if ui.add(btn)
+                    .on_hover_text(
+                        "Runs Add-MpPreference to whitelist this folder and the GUI\n\
+                         executable in Windows Defender / Microsoft Defender Antivirus.\n\
+                         Requires no extra elevation — the app already runs as Administrator.\n\
+                         \n\
+                         Use this if Defender flags payload_dll.dll or payload_dll_persistent.dll\n\
+                         as suspicious (false positive from the DLL injection technique).",
+                    )
+                    .clicked()
+                {
+                    *do_defender_exclusion = true;
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "Whitelists this folder + capture_bypass_gui.exe. Safe to run multiple times."
+                )
+                .weak()
+                .small(),
+            );
             ui.add_space(12.0);
 
             // Notifications
@@ -3619,6 +3812,41 @@ fn sha256_of_file(path: &std::path::Path)
         Ok(hash)
     } else {
         Err(format!("Unexpected hash output: {hash}").into())
+    }
+}
+
+/// Add the capture-bypass directory to Windows Defender's exclusion list.
+///
+/// Runs `Add-MpPreference -ExclusionPath` via PowerShell, which requires no
+/// additional elevation because the app already holds Administrator rights.
+/// Returns Ok(()) on success, or Err(reason) with the PowerShell stderr text.
+fn add_defender_exclusion(exe_dir: &Path) -> Result<(), String> {
+    // Use the raw OsStr so non-ASCII install paths work correctly.
+    let dir_str = exe_dir.to_string_lossy();
+
+    // Escape any single quotes in the path (rare but possible) by doubling them,
+    // which is the PowerShell convention inside single-quoted strings.
+    let safe_dir = dir_str.replace('\'', "''");
+
+    let command = format!(
+        "Add-MpPreference -ExclusionPath '{safe_dir}'; \
+         Add-MpPreference -ExclusionProcess 'capture_bypass_gui.exe'"
+    );
+
+    let out = std::process::Command::new("powershell")
+        .args(["-NonInteractive", "-NoProfile", "-Command", &command])
+        .output()
+        .map_err(|e| format!("Failed to launch PowerShell: {e}"))?;
+
+    if out.status.success() {
+        Ok(())
+    } else {
+        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if msg.is_empty() {
+            format!("PowerShell exited with status {}", out.status)
+        } else {
+            msg
+        })
     }
 }
 

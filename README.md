@@ -157,6 +157,7 @@ Open **⚙ Settings** in the header to access all configuration options:
 | **Injection log file** | Appends every strip attempt (timestamp, PID, process, result, mode) to a persistent log file |
 | **Per-process rules** | Override the global Mode for specific executables: *Always One-shot*, *Always Persistent*, or *Skip* (never inject) |
 | **Exclusion list** | Executables in this list are completely ignored by all injection operations — manual, auto-inject, and Strip All Protected |
+| **Add Defender Exclusion** | Whitelists the install folder and `capture_bypass_gui.exe` in Windows Defender — fixes false-positive flagging of the payload DLLs with no extra elevation needed |
 
 All settings are saved automatically to `config.toml` alongside the executable.
 
