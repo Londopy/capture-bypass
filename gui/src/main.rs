@@ -429,22 +429,21 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             "Enable logging to write every injection attempt (timestamp, PID, \
              process name, result) to a persistent log file alongside the \
              executable.  Useful for debugging or keeping an audit trail."),
-        ("Add Defender Exclusion",
-            "Click the 🛡 Add Defender Exclusion button to whitelist the \
-             capture-bypass folder and the GUI executable in Windows Defender \
-             / Microsoft Defender Antivirus.\n\
+        ("Windows Defender",
+            "If Windows Defender flags payload_dll.dll or \
+             payload_dll_persistent.dll as suspicious, this is a false \
+             positive caused by the DLL injection technique — not malware.\n\
              \n\
-             Internally runs:\n\
-               Add-MpPreference -ExclusionPath <install folder>\n\
-               Add-MpPreference -ExclusionProcess capture_bypass_gui.exe\n\
+             To add an exclusion, open PowerShell as Administrator and run \
+             the two commands shown in the Windows Defender section of \
+             Settings.  Use the 📋 Copy commands button to copy them to \
+             your clipboard, then paste into PowerShell and press Enter.\n\
              \n\
-             No additional elevation is needed — the app already runs as \
-             Administrator.  The button is safe to click multiple times; \
-             Windows Defender ignores duplicate exclusion entries.\n\
+             The commands are:\n\
+               Add-MpPreference -ExclusionPath '<install folder>'\n\
+               Add-MpPreference -ExclusionProcess 'capture_bypass_gui.exe'\n\
              \n\
-             Use this when Defender flags payload_dll.dll or \
-             payload_dll_persistent.dll as suspicious.  This is a false \
-             positive caused by the DLL injection technique, not malware."),
+             Safe to run multiple times — Defender ignores duplicate entries."),
     ]),
     ("Per-Process Rules & Exclusions", &[
         ("Per-process rules",
@@ -987,7 +986,7 @@ impl App {
                 // Unreachable in normal operation, but clean up properly.
                 if !hook.is_invalid() {
                     use windows::Win32::UI::Accessibility::UnhookWinEvent;
-                    UnhookWinEvent(hook);
+                    let _ = UnhookWinEvent(hook);
                 }
             })
             .ok(); // non-critical — polling still works if spawn fails
@@ -1796,7 +1795,6 @@ impl eframe::App for App {
         let mut remove_process_rule: Option<usize>    = None;
         let mut add_exclusion                         = false;
         let mut remove_exclusion: Option<usize>       = None;
-        let mut do_defender_exclusion                 = false;
         render_settings_window(
             ctx,
             &mut self.show_settings,
@@ -1834,32 +1832,8 @@ impl eframe::App for App {
             &mut remove_process_rule,
             &mut add_exclusion,
             &mut remove_exclusion,
-            &mut do_defender_exclusion,
+            &self.exe_dir.to_string_lossy(),
         );
-
-        // Defender exclusion — spawn background thread so the PowerShell
-        // startup latency doesn't hitch the UI.  Result is reported via the
-        // existing injection log channel (same pattern as auto-update).
-        if do_defender_exclusion {
-            let exe_dir = self.exe_dir.clone();
-            let tx      = self.inject_tx.clone();
-            std::thread::spawn(move || {
-                match add_defender_exclusion(&exe_dir) {
-                    Ok(()) => {
-                        let _ = tx.send(InjResult {
-                            msg: "🛡 Windows Defender: exclusion added for this folder and exe.".to_string(),
-                            ok:  true,
-                        });
-                    }
-                    Err(e) => {
-                        let _ = tx.send(InjResult {
-                            msg: format!("🛡 Defender exclusion failed: {e}"),
-                            ok:  false,
-                        });
-                    }
-                }
-            });
-        }
 
         // Update confirmation dialog
         // Rendered as a floating Window before the header panel so it
@@ -2012,14 +1986,27 @@ impl eframe::App for App {
                                 let installer_str = path.display().to_string().replace('\'', "''");
                                 let gui_str = our_exe.display().to_string().replace('\'', "''");
                                 let script = format!(
-                                    "Start-Process '{installer_str}' -ArgumentList '/SILENT' -Wait; \
-                                     Start-Process '{gui_str}'"
+                                    // 1. Wait 2 s for this process to fully exit and release
+                                    //    the file lock on capture_bypass_gui.exe before the
+                                    //    installer tries to replace it.
+                                    // 2. Run the installer silently, suppressing all dialogs.
+                                    // 3. Relaunch with -Verb RunAs so the new exe gets admin
+                                    //    rights without a visible UAC prompt (inherits the
+                                    //    already-elevated token from this PowerShell session).
+                                    "Start-Sleep -Seconds 2; \
+                                     Start-Process '{installer_str}' \
+                                       -ArgumentList '/SILENT /SUPPRESSMSGBOXES /NORESTART' \
+                                       -Wait; \
+                                     Start-Process '{gui_str}' -Verb RunAs"
                                 );
                                 let _ = std::process::Command::new("powershell")
                                     .args(["-NoProfile", "-WindowStyle", "Hidden",
                                            "-Command", &script])
                                     .spawn();
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                // Exit immediately — ViewportCommand::Close is async and
+                                // keeps the process alive long enough to lock the exe file,
+                                // causing the installer to silently fail the file replacement.
+                                std::process::exit(0);
                             }
                         }
 
@@ -2894,7 +2881,7 @@ fn render_settings_window(
     remove_process_rule: &mut Option<usize>,
     add_exclusion: &mut bool,
     remove_exclusion: &mut Option<usize>,
-    do_defender_exclusion: &mut bool,
+    exe_dir: &str,
 ) {
     if !*show {
         return;
@@ -2963,32 +2950,30 @@ fn render_settings_window(
             ui.label(RichText::new("Windows Defender").strong().color(Color32::from_rgb(180, 180, 220)));
             ui.separator();
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let btn = egui::Button::new("🛡  Add Defender Exclusion")
-                    .fill(Color32::from_rgb(30, 55, 110))
-                    .min_size([300.0, 28.0].into());
-                if ui.add(btn)
-                    .on_hover_text(
-                        "Runs Add-MpPreference to whitelist this folder and the GUI\n\
-                         executable in Windows Defender / Microsoft Defender Antivirus.\n\
-                         Requires no extra elevation — the app already runs as Administrator.\n\
-                         \n\
-                         Use this if Defender flags payload_dll.dll or payload_dll_persistent.dll\n\
-                         as suspicious (false positive from the DLL injection technique).",
-                    )
-                    .clicked()
-                {
-                    *do_defender_exclusion = true;
-                }
-            });
-            ui.add_space(4.0);
             ui.label(
                 RichText::new(
-                    "Whitelists this folder + capture_bypass_gui.exe. Safe to run multiple times."
+                    "If Defender flags payload_dll.dll or payload_dll_persistent.dll as \
+                     suspicious, add an exclusion manually. Open PowerShell as Administrator \
+                     and run:"
                 )
                 .weak()
                 .small(),
             );
+            ui.add_space(4.0);
+            let mut ps_cmd = format!(
+                "Add-MpPreference -ExclusionPath '{exe_dir}'\nAdd-MpPreference -ExclusionProcess 'capture_bypass_gui.exe'"
+            );
+            ui.add(
+                egui::TextEdit::multiline(&mut ps_cmd)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(2)
+                    .interactive(false),
+            );
+            ui.add_space(4.0);
+            if ui.button("📋  Copy commands").clicked() {
+                ui.output_mut(|o| o.copied_text = ps_cmd.clone());
+            }
             ui.add_space(12.0);
 
             // Notifications
@@ -3817,41 +3802,6 @@ fn sha256_of_file(path: &std::path::Path)
     }
 }
 
-/// Add the capture-bypass directory to Windows Defender's exclusion list.
-///
-/// Runs `Add-MpPreference -ExclusionPath` via PowerShell, which requires no
-/// additional elevation because the app already holds Administrator rights.
-/// Returns Ok(()) on success, or Err(reason) with the PowerShell stderr text.
-fn add_defender_exclusion(exe_dir: &Path) -> Result<(), String> {
-    // Use the raw OsStr so non-ASCII install paths work correctly.
-    let dir_str = exe_dir.to_string_lossy();
-
-    // Escape any single quotes in the path (rare but possible) by doubling them,
-    // which is the PowerShell convention inside single-quoted strings.
-    let safe_dir = dir_str.replace('\'', "''");
-
-    let command = format!(
-        "Add-MpPreference -ExclusionPath '{safe_dir}'; \
-         Add-MpPreference -ExclusionProcess 'capture_bypass_gui.exe'"
-    );
-
-    let out = std::process::Command::new("powershell")
-        .args(["-NonInteractive", "-NoProfile", "-Command", &command])
-        .output()
-        .map_err(|e| format!("Failed to launch PowerShell: {e}"))?;
-
-    if out.status.success() {
-        Ok(())
-    } else {
-        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        Err(if msg.is_empty() {
-            format!("PowerShell exited with status {}", out.status)
-        } else {
-            msg
-        })
-    }
-}
-
 fn check_for_update() -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
     let current = env!("CARGO_PKG_VERSION");
     let resp: serde_json::Value = ureq::get(
@@ -4015,6 +3965,10 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
+        // Don't restore the saved window position — let the OS place it on
+        // the primary monitor each launch.  We manage our own config persistence
+        // via config.toml for everything that matters.
+        persist_window: false,
         ..Default::default()
     };
 
