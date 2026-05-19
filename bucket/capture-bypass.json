@@ -7,6 +7,10 @@
     "64bit": {
       "url": "https://github.com/Londopy/capture-bypass/releases/download/v3.5.2/capture-bypass-3.5.2-portable-x64.zip",
       "hash": "sha256:placeholder"
+    },
+    "arm64": {
+      "url": "https://github.com/Londopy/capture-bypass/releases/download/v3.5.2/capture-bypass-3.5.2-portable-arm64.zip",
+      "hash": "sha256:placeholder"
     }
   },
   "bin": [
@@ -22,6 +26,9 @@
     "architecture": {
       "64bit": {
         "url": "https://github.com/Londopy/capture-bypass/releases/download/v$version/capture-bypass-$version-portable-x64.zip"
+      },
+      "arm64": {
+        "url": "https://github.com/Londopy/capture-bypass/releases/download/v$version/capture-bypass-$version-portable-arm64.zip"
       }
     }
   }

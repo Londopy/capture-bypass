@@ -1,18 +1,12 @@
-//! capture_bypass CLI
-//!
-//! Usage:
-//!   cli.exe <pid> <dll_path>
-//!
-//! Exit codes:
-//!   0  — injection succeeded
-//!   1  — bad arguments or injection failed
-//!
-//! On success, prints one line to stdout:  OK pid=<pid>
-//! On failure, prints one line to stderr:  ERROR <message>
-//!
-//! Injection uses `inject_dll_stealth`: the DLL is first copied to a randomly
-//! named temp file so the module name visible to CreateToolhelp32Snapshot is
-//! an opaque string rather than the original DLL filename.
+// capture_bypass CLI
+//
+// Usage: cli.exe <pid> <dll_path>
+//
+// Exits 0 on success, 1 on any failure.
+// Prints "OK pid=<pid>" on success, "ERROR <reason>" on failure.
+//
+// Uses inject_dll_stealth so the DLL gets copied to a random temp name
+// before loading -- the module list won't show "payload_dll.dll".
 
 use std::{path::PathBuf, process};
 

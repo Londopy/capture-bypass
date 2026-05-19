@@ -1,49 +1,41 @@
-//! injector_core — shared DLL injection logic.
-//!
-//! Classic LoadLibrary injection pipeline:
-//!   OpenProcess → VirtualAllocEx → WriteProcessMemory
-//!   → CreateRemoteThread(LoadLibraryA) → WaitForSingleObject → cleanup.
-//!
-//! # Stealth injection
-//!
-//! `inject_dll_stealth` wraps `inject_dll` with two hardening steps:
-//!
-//! 1. **Random temp copy** — the DLL is copied to `%TEMP%\<hex>.tmp` before
-//!    injection, so the module name visible to `CreateToolhelp32Snapshot`
-//!    (TH32CS_SNAPMODULE) or `EnumProcessModules` is an opaque random string,
-//!    not `payload_dll.dll`.  Name-based scanners find nothing.
-//!
-//! 2. **Immediate file deletion** — the temp file is removed right after
-//!    `LoadLibrary` returns.  Windows keeps the DLL mapped in the target via its
-//!    internal VAD / file-object reference, so it continues running normally.
-//!    The on-disk path no longer exists, meaning the target cannot re-read,
-//!    hash-check, or re-load the file to identify it.
+// injector_core -- shared DLL injection logic used by both the GUI and CLI.
+//
+// Basic flow:
+//   OpenProcess → VirtualAllocEx → WriteProcessMemory
+//   → CreateRemoteThread(LoadLibraryA) → WaitForSingleObject → cleanup
+//
+// Stealth mode (inject_dll_stealth / inject_checked):
+//   Before injecting, the DLL gets copied to %TEMP%\<random_hex>.tmp so the
+//   module name visible in CreateToolhelp32Snapshot or EnumProcessModules is
+//   just a random string instead of "payload_dll.dll". After LoadLibrary
+//   returns, the temp file is deleted -- the DLL stays mapped in the target
+//   via Windows' internal file-object reference, so it keeps running fine.
 
 use std::{ffi::CString, path::Path};
 
-// ── Structured error type ─────────────────────────────────────────────────────
-
-/// Typed injection failure — lets callers match on root cause rather than
-/// parsing an error string.
+// Typed error so callers can match on what actually went wrong
 #[derive(Debug)]
 pub enum InjectError {
-    /// The DLL file was not found at the given path.
+    // DLL file doesn't exist at the given path
     DllNotFound(std::path::PathBuf),
-    /// The DLL path is not valid UTF-8.
+    // Path isn't valid UTF-8
     BadPath,
-    /// The DLL path contains an interior null byte.
+    // Path has a null byte in it
     NullByte,
-    /// `OpenProcess` failed — most likely insufficient privileges.
+    // OpenProcess failed -- usually means we need admin or the PID is wrong
     OpenProcess(windows::core::Error),
-    /// `VirtualAllocEx` returned null.
+    // VirtualAllocEx returned null
     Alloc,
-    /// `WriteProcessMemory` failed.
+    // WriteProcessMemory failed
     WriteMemory(windows::core::Error),
-    /// `CreateRemoteThread` failed.
+    // CreateRemoteThread failed
     RemoteThread(windows::core::Error),
-    /// Copying to the stealth temp path failed.
+    // Copying to temp path failed
     StealthCopy(std::io::Error),
-    /// Any other Windows API error.
+    // The target process has mitigation policies that block DLL injection.
+    // Nothing user-mode can do about this one.
+    MitigationPolicy(String),
+    // Anything else Windows threw at us
     Other(windows::core::Error),
 }
 
@@ -66,6 +58,9 @@ impl std::fmt::Display for InjectError {
                 write!(f, "CreateRemoteThread failed: {}", e.message()),
             InjectError::StealthCopy(e) =>
                 write!(f, "Stealth copy to temp failed: {e}"),
+            InjectError::MitigationPolicy(reason) =>
+                write!(f, "Process has Windows mitigation policies that block DLL injection \
+                           (no user-mode workaround): {reason}"),
             InjectError::Other(e) =>
                 write!(f, "{}", e.message()),
         }
@@ -74,12 +69,10 @@ impl std::fmt::Display for InjectError {
 
 impl std::error::Error for InjectError {}
 
-/// Type alias for convenience.
 pub type InjectResult = std::result::Result<(), InjectError>;
 
-/// High-level entry point that returns a typed [`InjectError`] instead of a
-/// raw `windows::core::Error`.  Prefer this over [`inject_dll`] when you want
-/// to match on the failure reason.
+// inject_checked is what the GUI uses -- returns a typed InjectError so
+// we can match on MitigationPolicy separately from other failures.
 pub fn inject_checked(pid: u32, dll_path: &Path) -> InjectResult {
     if !dll_path.exists() {
         return Err(InjectError::DllNotFound(dll_path.to_path_buf()));
@@ -94,6 +87,7 @@ pub fn inject_checked(pid: u32, dll_path: &Path) -> InjectResult {
     result
 }
 
+// Copy the DLL to %TEMP%\<random_hex>.tmp before injecting
 fn make_stealth_copy(pid: u32, dll_path: &Path) -> std::result::Result<std::path::PathBuf, std::io::Error> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -118,27 +112,22 @@ use windows::{
                 PAGE_READWRITE,
             },
             Threading::{
-                CreateRemoteThread, OpenProcess, WaitForSingleObject,
+                CreateRemoteThread, GetProcessMitigationPolicy, OpenProcess,
+                WaitForSingleObject,
+                ProcessDynamicCodePolicy, ProcessExtensionPointDisablePolicy,
+                ProcessSignaturePolicy,
                 PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION,
                 PROCESS_VM_WRITE,
+                PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY,
+                PROCESS_MITIGATION_DYNAMIC_CODE_POLICY,
+                PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY,
             },
         },
     },
 };
 
-/// Inject `dll_path` into `pid` using a randomised temp copy.
-///
-/// This is the preferred entry point for the GUI.  It copies the DLL to
-/// `%TEMP%\<random_hex>.tmp` before calling [`inject_dll`], so the module
-/// name visible to `CreateToolhelp32Snapshot` (TH32CS_SNAPMODULE) or
-/// `EnumProcessModules` is an opaque string rather than `payload_dll.dll`.
-///
-/// This defeats the common defensive pattern where the target application
-/// calls `CreateToolhelp32Snapshot`, walks its own module list looking for
-/// known DLL names, and calls `FreeLibrary` on anything it recognises.
-///
-/// The temp file is cleaned up on injection failure; on success it is left
-/// in `%TEMP%` and will be swept up by normal OS temp-file cleanup.
+// inject_dll_stealth is what the CLI uses -- wraps inject_dll with the temp-copy
+// stealth trick. Returns a windows::core::Error on failure.
 pub fn inject_dll_stealth(pid: u32, dll_path: &Path) -> windows::core::Result<()> {
     let tmp_path = make_stealth_copy(pid, dll_path).map_err(|e| {
         windows::core::Error::new(
@@ -154,23 +143,72 @@ pub fn inject_dll_stealth(pid: u32, dll_path: &Path) -> windows::core::Result<()
     result
 }
 
-/// Inject `dll_path` into the process identified by `pid`.
-///
-/// Returns `Ok(())` when the remote thread has run to completion (DllMain
-/// executed).  Returns a descriptive `Err` on any failure — the caller should
-/// surface `e.message()` to the user.
-///
-/// For richer error matching, use [`inject_checked`] instead.
+// inject_dll is the basic version -- no stealth copy, no typed errors.
+// Prefer inject_checked when you want to match on the failure reason.
 pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<()> {
     inject_dll_inner(pid, dll_path).map_err(|e| {
         Error::new(windows::Win32::Foundation::E_FAIL, e.to_string())
     })
 }
 
-/// Core injection implementation that returns [`InjectError`].
+// Check if the target process has mitigation policies that will block injection.
+// Returns Some(reason) if anything would stop us, None if we're probably fine.
+// We check three policies: signature requirements, extension point disable, and
+// dynamic code prohibition. Any one of them blocks CreateRemoteThread+LoadLibrary.
+fn check_mitigation_policies(process: HANDLE) -> Option<String> {
+    let mut reasons: Vec<&'static str> = Vec::new();
+
+    unsafe {
+        // Only MS-signed DLLs allowed -- our unsigned DLL gets rejected by the loader
+        let mut sig =
+            std::mem::zeroed::<PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY>();
+        if GetProcessMitigationPolicy(
+            process,
+            ProcessSignaturePolicy,
+            std::ptr::addr_of_mut!(sig).cast(),
+            std::mem::size_of::<PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY>(),
+        ).is_ok() && (sig._bitfield & 0x1) != 0 {
+            reasons.push("requires Microsoft-signed DLLs (ProcessSignaturePolicy)");
+        }
+
+        // Blocks the LoadLibrary injection path at the AppInit/shim layer
+        let mut ext =
+            std::mem::zeroed::<PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY>();
+        if GetProcessMitigationPolicy(
+            process,
+            ProcessExtensionPointDisablePolicy,
+            std::ptr::addr_of_mut!(ext).cast(),
+            std::mem::size_of::<PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY>(),
+        ).is_ok() && (ext._bitfield & 0x1) != 0 {
+            reasons.push("blocks extension-point DLL loading \
+                          (ProcessExtensionPointDisablePolicy)");
+        }
+
+        // No new executable memory allowed -- CreateRemoteThread won't work
+        let mut dyn_code =
+            std::mem::zeroed::<PROCESS_MITIGATION_DYNAMIC_CODE_POLICY>();
+        if GetProcessMitigationPolicy(
+            process,
+            ProcessDynamicCodePolicy,
+            std::ptr::addr_of_mut!(dyn_code).cast(),
+            std::mem::size_of::<PROCESS_MITIGATION_DYNAMIC_CODE_POLICY>(),
+        ).is_ok() && (dyn_code._bitfield & 0x1) != 0 {
+            reasons.push("prohibits dynamic code execution \
+                          (ProcessDynamicCodePolicy)");
+        }
+    }
+
+    if reasons.is_empty() {
+        None
+    } else {
+        Some(reasons.join("; "))
+    }
+}
+
+// The actual injection -- opens the process, writes the DLL path into it,
+// and starts a remote thread pointing at LoadLibraryA.
 fn inject_dll_inner(pid: u32, dll_path: &Path) -> InjectResult {
-    // LoadLibraryA is an ANSI API — build a null-terminated ANSI string.
-    // If your DLL lives at a non-ASCII path, swap this for LoadLibraryW.
+    // LoadLibraryA takes an ANSI string, so we need a null-terminated one
     let path_str = dll_path
         .to_str()
         .ok_or(InjectError::BadPath)?;
@@ -181,7 +219,7 @@ fn inject_dll_inner(pid: u32, dll_path: &Path) -> InjectResult {
     let path_bytes = path_cstr.as_bytes_with_nul();
 
     unsafe {
-        // ── 1. Open target process ────────────────────────────────────────────
+        // 1. Open the target process
         let process: HANDLE = OpenProcess(
             PROCESS_CREATE_THREAD
                 | PROCESS_VM_OPERATION
@@ -192,7 +230,14 @@ fn inject_dll_inner(pid: u32, dll_path: &Path) -> InjectResult {
         )
         .map_err(InjectError::OpenProcess)?;
 
-        // ── 2. Allocate memory in the target for the DLL path string ──────────
+        // 1a. Check mitigation policies before doing anything else --
+        // if the OS will reject our DLL anyway, bail out with a clear message
+        if let Some(reason) = check_mitigation_policies(process) {
+            let _ = CloseHandle(process);
+            return Err(InjectError::MitigationPolicy(reason));
+        }
+
+        // 2. Allocate memory in the target for the DLL path string
         let remote_buf = VirtualAllocEx(
             process,
             None,
@@ -206,7 +251,7 @@ fn inject_dll_inner(pid: u32, dll_path: &Path) -> InjectResult {
             return Err(InjectError::Alloc);
         }
 
-        // ── 3. Write the DLL path into the target ─────────────────────────────
+        // 3. Write the DLL path into the target
         if let Err(e) = WriteProcessMemory(
             process,
             remote_buf,
@@ -219,7 +264,7 @@ fn inject_dll_inner(pid: u32, dll_path: &Path) -> InjectResult {
             return Err(InjectError::WriteMemory(e));
         }
 
-        // ── 4. Resolve LoadLibraryA — identical VA in every process ───────────
+        // 4. Resolve LoadLibraryA -- same virtual address in every process on the same OS
         let kernel32 = GetModuleHandleA(s!("kernel32.dll"))
             .map_err(InjectError::Other)?;
         let load_library_raw = GetProcAddress(kernel32, s!("LoadLibraryA"))
@@ -228,18 +273,17 @@ fn inject_dll_inner(pid: u32, dll_path: &Path) -> InjectResult {
                 "GetProcAddress(LoadLibraryA) returned null",
             )))?;
 
-        // LoadLibraryA(LPCSTR) and LPTHREAD_START_ROUTINE(*mut c_void) are
-        // ABI-compatible on x64 Windows (both pointer-sized, same calling conv).
+        // LoadLibraryA and LPTHREAD_START_ROUTINE are ABI-compatible on x64 Windows
         let thread_start: windows::Win32::System::Threading::LPTHREAD_START_ROUTINE =
             Some(std::mem::transmute(load_library_raw as *const ()));
 
-        // ── 5. Spin up the remote thread ──────────────────────────────────────
+        // 5. Start the remote thread -- argument is the pointer to our DLL path string
         let thread = CreateRemoteThread(
             process,
             None,
             0,
             thread_start,
-            Some(remote_buf), // argument = pointer to DLL path string
+            Some(remote_buf),
             0,
             None,
         );
@@ -253,10 +297,10 @@ fn inject_dll_inner(pid: u32, dll_path: &Path) -> InjectResult {
             }
         };
 
-        // ── 6. Wait for DllMain to return (≤ 5 s) ────────────────────────────
+        // 6. Wait for DllMain to return (up to 5 seconds)
         WaitForSingleObject(thread, 5_000);
 
-        // ── 7. Clean up ────────────────────────────────────────────────────────
+        // 7. Clean up
         let _ = CloseHandle(thread);
         let _ = VirtualFreeEx(process, remote_buf, 0, MEM_RELEASE);
         let _ = CloseHandle(process);

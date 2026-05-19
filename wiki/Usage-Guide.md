@@ -126,9 +126,29 @@ The right side shows a live count: `N windows • N protected • N 32-bit`.
 
 ---
 
+## ⚙ Settings
+
+Click the **⚙ Settings** button in the header to open the Settings window. Everything here is saved to config and restored on next launch.
+
+| Setting | What it does |
+|---|---|
+| 🚀 Start with Windows | Adds/removes a startup registry entry so the app launches at login |
+| 🔔 Toast notifications | Enables Windows desktop notifications for auto-inject strips |
+| ⌨ Ctrl+Shift+B | Registers/unregisters the global hotkey |
+| 🗕 Minimize to tray on close | ON = ✕ hides to tray; OFF = ✕ exits the app |
+| 📋 Injection log file | Appends a timestamped line to `injection.log` for every strip attempt |
+
+### Injection log file
+
+When enabled, every injection result (success or failure) is logged to `%APPDATA%\capture-bypass\injection.log` with a UTC timestamp and the mode that was used. The file is created automatically the first time something gets logged.
+
+Click **Open log file** in the Settings window to open it directly in Explorer. Useful if you want a record of what got stripped and when.
+
+---
+
 ## Persistent settings
 
-All UI state is saved automatically to `%APPDATA%\capture-bypass\config.toml` after every change and restored on next launch. Settings saved include: injection mode, auto-inject, protected-only filter, toast notifications, hotkey registration, log panel visibility, watch names, and the active sort column and direction.
+All UI state is saved automatically to `%APPDATA%\capture-bypass\config.toml` after every change and restored on next launch. Settings saved include: injection mode, auto-inject, protected-only filter, toast notifications, hotkey, log panel visibility, watch names, sort column, tray behavior, and injection log file toggle.
 
 ---
 

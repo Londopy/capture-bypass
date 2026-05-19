@@ -1,6 +1,5 @@
-//! Embed the shared app icon into stress_tester.exe.
-//! The icon lives one level up in gui/icon.ico so both binaries
-//! share the same asset without duplication.
+// Embeds the app icon into stress_tester.exe.
+// Reuses gui/icon.ico so both binaries share the same file.
 
 fn main() {
     if std::env::var("CARGO_CFG_WINDOWS").is_ok() {

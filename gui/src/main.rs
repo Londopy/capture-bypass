@@ -48,7 +48,7 @@ use windows::Win32::{
     },
 };
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// Constants
 
 const WDA_NONE: u32 = 0x00000000;
 const WDA_MONITOR: u32 = 0x00000001;
@@ -64,7 +64,7 @@ const BROWSER_NAMES: &[&str] = &[
     "thorium.exe",
 ];
 
-// ── Persistent config ─────────────────────────────────────────────────────────
+// Persistent config
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Config {
@@ -88,6 +88,8 @@ struct Config {
     sort_asc: bool,
     #[serde(default = "default_minimize_to_tray")]
     minimize_to_tray: bool,
+    #[serde(default)]
+    logging_enabled: bool,
 }
 
 fn default_sort_col() -> u8 { 0 }
@@ -106,6 +108,7 @@ impl Default for Config {
             sort_col: 0,
             sort_asc: true,
             minimize_to_tray: true,
+            logging_enabled: false,
         }
     }
 }
@@ -139,7 +142,7 @@ fn save_config(cfg: &Config) {
     }
 }
 
-// ── Help content ──────────────────────────────────────────────────────────────
+// Help content
 //
 // Structure: &[( tab_label, &[( sub_heading, body_text )] )]
 // render_help_window() turns each sub_heading into a bold label + separator,
@@ -324,7 +327,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     ]),
 ];
 
-// ── Data model ────────────────────────────────────────────────────────────────
+// Data model
 
 #[derive(Clone, Debug)]
 struct WindowEntry {
@@ -336,14 +339,14 @@ struct WindowEntry {
     is_32bit: bool,
 }
 
-// ── Injection result message ──────────────────────────────────────────────────
+// Injection result message
 
 struct InjResult {
     msg: String,
     ok: bool,
 }
 
-// ── Injection log ─────────────────────────────────────────────────────────────
+// Injection log
 
 struct LogEntry {
     time: Instant,
@@ -351,7 +354,7 @@ struct LogEntry {
     ok: bool,
 }
 
-// ── Column sort ───────────────────────────────────────────────────────────────
+// Column sort
 
 #[derive(Clone, Copy, PartialEq)]
 enum SortCol { Pid, Process, Title, Status }
@@ -375,7 +378,7 @@ impl SortCol {
     }
 }
 
-// ── Update check state ────────────────────────────────────────────────────────
+// Update check state
 
 enum UpdateState {
     Checking,
@@ -384,7 +387,7 @@ enum UpdateState {
     Failed,
 }
 
-// ── App ───────────────────────────────────────────────────────────────────────
+// App
 
 struct App {
     // Shared window list (background refresh thread writes, UI reads)
@@ -453,6 +456,8 @@ struct App {
     tray_quit_id: Option<tray_icon::menu::MenuId>,
     // When true, X hides to tray instead of closing the process.
     minimize_to_tray: bool,
+    // When true, each injection is appended to %APPDATA%\capture-bypass\injection.log
+    logging_enabled: bool,
 
     // Set by the off-thread tray watcher when the user clicks Open.
     tray_show: Arc<AtomicBool>,
@@ -507,7 +512,7 @@ impl App {
         // Set up system tray
         let (tray_icon, tray_open_id, tray_quit_id) = build_tray();
 
-        // ── Tray event watcher thread ────────────────────────────────────────
+        // Tray event watcher thread
         // We cannot poll tray events inside update() because winit stops
         // dispatching repaints to hidden viewports, so update() never runs
         // while the window is in the tray.  A dedicated blocking thread solves
@@ -571,6 +576,7 @@ impl App {
             tray_open_id,
             tray_quit_id,
             minimize_to_tray: cfg.minimize_to_tray,
+            logging_enabled: cfg.logging_enabled,
             tray_show,
             inject_tx,
             inject_rx,
@@ -585,7 +591,7 @@ impl App {
         app
     }
 
-    // ── DLL path resolution ────────────────────────────────────────────────────
+    // DLL path resolution
 
     fn dll_path(&self, is_32bit: bool) -> PathBuf {
         let name = if self.persistent_mode {
@@ -610,7 +616,7 @@ impl App {
         }
     }
 
-    // ── Injection ──────────────────────────────────────────────────────────────
+    // Injection
 
     fn inject_pid_async(&self, pid: u32, process_name: String, is_32bit: bool) {
         let dll_path = self.dll_path(is_32bit);
@@ -705,7 +711,60 @@ impl App {
         self.status_time = Some(Instant::now());
     }
 
-    // ── Persist config ─────────────────────────────────────────────────────────
+    // Injection log file helpers
+
+    /// Returns `%APPDATA%\capture-bypass\injection.log`
+    fn log_path() -> Option<std::path::PathBuf> {
+        dirs_next::config_dir().map(|d| d.join("capture-bypass").join("injection.log"))
+    }
+
+    /// Computes a UTC timestamp string (YYYY-MM-DD HH:MM:SS UTC) from SystemTime
+    /// without pulling in the chrono crate.
+    fn utc_timestamp() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Gregorian calendar math
+        let s   = secs % 60;
+        let m   = (secs / 60) % 60;
+        let h   = (secs / 3_600) % 24;
+        let days = secs / 86_400; // days since 1970-01-01
+        // Shift epoch to 2000-03-01 (makes leap-year math simpler)
+        let days400 = days + 10_957 + 31 + 28; // offset to 2000-03-01
+        let (era, doe) = {
+            let era = days400 / 146_097;
+            (era, days400 - era * 146_097)
+        };
+        let yoe = (doe - doe/1_460 + doe/36_524 - doe/146_096) / 365;
+        let y   = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp  = (5 * doy + 2) / 153;
+        let d   = doy - (153 * mp + 2) / 5 + 1;
+        let mo  = if mp < 10 { mp + 3 } else { mp - 9 };
+        let yr  = if mo <= 2 { y + 1 } else { y };
+        format!("{yr:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02} UTC")
+    }
+
+    /// Appends a single log line to the injection log file.
+    /// Creates the directory and file if they don't exist.
+    fn append_log_entry(&self, line: &str) {
+        if let Some(path) = Self::log_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true).append(true).open(&path)
+            {
+                let ts = Self::utc_timestamp();
+                let _ = writeln!(f, "[{ts}] {line}");
+            }
+        }
+    }
+
+    // Persist config
 
     fn persist(&self) {
         save_config(&Config {
@@ -719,76 +778,126 @@ impl App {
             sort_col: self.sort_col.to_u8(),
             sort_asc: self.sort_asc,
             minimize_to_tray: self.minimize_to_tray,
+            logging_enabled: self.logging_enabled,
         });
     }
 
-    // ── Auto-inject ────────────────────────────────────────────────────────────
+    // Auto-inject
 
     fn start_auto_inject(&mut self) {
         self.auto_inject_running.store(true, Ordering::Relaxed);
-        self.auto_inject_seen.lock().unwrap().clear();
-        let running = Arc::clone(&self.auto_inject_running);
-        let seen = Arc::clone(&self.auto_inject_seen);
-        let exe_dir = self.exe_dir.clone();
+        let running   = Arc::clone(&self.auto_inject_running);
+        let exe_dir   = self.exe_dir.clone();
         let persistent = self.persistent_mode;
-        let tx = self.inject_tx.clone();
-
-        let toast = self.toast_enabled;
+        let tx        = self.inject_tx.clone();
+        let toast     = self.toast_enabled;
 
         std::thread::spawn(move || {
+            // Per-PID state, entirely local to this thread — no Arc needed.
+            //
+            // (process_name, used_persistent, gave_up)
+            //
+            //  gave_up = true  → OS-level block (MitigationPolicy); don't retry.
+            //  used_persistent = true → persistent DLL is active; protection
+            //      shouldn't return, but skip quietly if it does (transient).
+            //  Neither → one-shot injection succeeded; if protection comes back
+            //      for the same PID we escalate to persistent automatically.
+            let mut state: HashMap<u32, (String, bool, bool)> = HashMap::new();
+
             while running.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(500));
+                std::thread::sleep(Duration::from_millis(800));
+
                 let windows = enumerate_windows();
+
+                // Remove entries for processes that have exited
+                // When a process restarts it gets a fresh PID and is treated as
+                // a new arrival, which is exactly what we want.
+                let live_pids: HashSet<u32> = windows.iter().map(|w| w.pid).collect();
+                state.retain(|pid, _| live_pids.contains(pid));
+
                 for w in windows.iter().filter(|w| w.is_protected) {
-                    let already_seen = {
-                        let mut guard = seen.lock().unwrap();
-                        !guard.insert(w.pid)
-                    };
-                    if already_seen {
-                        continue;
-                    }
-                    // Build DLL path inline (mirrors dll_path())
-                    let dll_name = if persistent {
+                    // Decide what action (if any) to take
+                    let (use_persistent, is_escalation) =
+                        match state.get(&w.pid) {
+                            // Never seen this PID → use the user's global setting.
+                            None => (persistent, false),
+
+                            // Persistent DLL already active — protection coming
+                            // back is transient (hook races); skip quietly.
+                            Some((_, true, _)) => continue,
+
+                            // OS policy blocked us — nothing more we can do.
+                            Some((_, _, true)) => continue,
+
+                            // One-shot injection succeeded earlier but protection
+                            // is back → the app re-applied it.  Escalate to the
+                            // persistent DLL, which hooks SetWindowDisplayAffinity
+                            // so the app can no longer reapply the flag.
+                            Some((_, false, false)) => (true, true),
+                        };
+
+                    let dll_name = if use_persistent {
                         "payload_dll_persistent.dll"
                     } else {
                         "payload_dll.dll"
                     };
-                    // Mirror dll_path(): prefer {exe_dir}/x86/ for 32-bit, fall back to
-                    // Cargo dev layout only if the installed path doesn't exist.
+
                     let resolve_dll = |is32: bool| -> PathBuf {
                         if is32 {
-                            let installed = exe_dir.join("x86").join(dll_name);
-                            if installed.exists() {
-                                return installed;
-                            }
-                            exe_dir.join("..").join("i686-pc-windows-msvc").join("release").join(dll_name)
+                            let p = exe_dir.join("x86").join(dll_name);
+                            if p.exists() { return p; }
+                            exe_dir.join("..").join("i686-pc-windows-msvc")
+                                   .join("release").join(dll_name)
                         } else {
                             exe_dir.join(dll_name)
                         }
                     };
 
+                    // Expand browsers to child processes (renderer isolation).
                     let mut pids: Vec<(u32, String, bool)> =
                         vec![(w.pid, w.process_name.clone(), w.is_32bit)];
                     if BROWSER_NAMES.iter().any(|b| w.process_name.eq_ignore_ascii_case(b)) {
                         for child in get_child_pids(w.pid) {
-                            pids.push((child, w.process_name.clone(), is_process_32bit(child)));
+                            pids.push((child, w.process_name.clone(),
+                                       is_process_32bit(child)));
                         }
                     }
 
                     for (pid, name, is32) in pids {
                         let dll_path = resolve_dll(is32);
-                        if !dll_path.exists() {
-                            continue;
-                        }
-                        match injector_core::inject_dll_stealth(pid, &dll_path) {
+                        if !dll_path.exists() { continue; }
+
+                        match injector_core::inject_checked(pid, &dll_path) {
                             Ok(()) => {
-                                let msg = format!("🤖 Auto-stripped {name} (PID {pid})");
-                                if toast {
-                                    send_toast("capture-bypass", &msg);
-                                }
+                                let verb = if is_escalation {
+                                    "🔄 Escalated→persistent"
+                                } else {
+                                    "🤖 Auto-stripped"
+                                };
+                                let msg = format!("{verb} {name} (PID {pid})");
+                                if toast { send_toast("capture-bypass", &msg); }
                                 let _ = tx.send(InjResult { msg, ok: true });
+                                state.insert(pid, (name, use_persistent, false));
                             }
-                            Err(_) => {}
+
+                            // OS-enforced block — nothing we can do in user-mode.
+                            // Log once and give up on this PID.
+                            Err(injector_core::InjectError::MitigationPolicy(reason)) => {
+                                let msg = format!(
+                                    "⛔ {name} (PID {pid}) blocked by OS policy: {reason}"
+                                );
+                                let _ = tx.send(InjResult { msg, ok: false });
+                                state.insert(pid, (name, false, true));
+                            }
+
+                            // Other errors (privilege race, timing) — log only
+                            // if we haven't already logged for this PID.
+                            Err(e) => {
+                                if !state.contains_key(&pid) {
+                                    let msg = format!("⚠️ {name} (PID {pid}): {e}");
+                                    let _ = tx.send(InjResult { msg, ok: false });
+                                }
+                            }
                         }
                     }
                 }
@@ -801,12 +910,15 @@ impl App {
     }
 }
 
-// ── egui rendering ─────────────────────────────────────────────────────────────
+// egui rendering
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ── Poll injection results ───────────────────────────────────────────
+        // Poll injection results
         while let Ok(result) = self.inject_rx.try_recv() {
+            if self.logging_enabled {
+                self.append_log_entry(&result.msg);
+            }
             self.log_entries.push(LogEntry {
                 time: Instant::now(),
                 msg: result.msg.clone(),
@@ -818,14 +930,14 @@ impl eframe::App for App {
             self.set_status(result.msg, result.ok);
         }
 
-        // ── Poll auto-update result ──────────────────────────────────────────
+        // Poll auto-update result
         if let Some(rx) = &self.update_rx {
             while let Ok(state) = rx.try_recv() {
                 self.update_state = Some(state);
             }
         }
 
-        // ── Poll global hotkey messages ──────────────────────────────────────
+        // Poll global hotkey messages
         if self.hotkey_enabled {
             unsafe {
                 let mut msg: MSG = std::mem::zeroed();
@@ -839,7 +951,7 @@ impl eframe::App for App {
             }
         }
 
-        // ── Tray "Open" action ───────────────────────────────────────────────
+        // Tray "Open" action
         // Quit is handled by the off-thread tray watcher (process::exit).
         // Open sets this flag + requests a repaint so we catch it here.
         if self.tray_show.load(Ordering::Relaxed) {
@@ -848,7 +960,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
-        // ── Handle window close (X button) ──────────────────────────────────
+        // Handle window close (X button)
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.minimize_to_tray {
                 // Hide to tray — the tray watcher thread handles true quit.
@@ -861,7 +973,7 @@ impl eframe::App for App {
         // Snapshot current window list
         let all_windows: Vec<WindowEntry> = self.shared_windows.lock().unwrap().clone();
 
-        // ── Detect re-applied protection on one-shot stripped processes ─────────
+        // Detect re-applied protection on one-shot stripped processes
         // Only fires when NOT in persistent mode and NOT in auto-inject (which
         // would handle it silently).  Moves matching PIDs to reapply_alert so the
         // modal popup can prompt the user.
@@ -875,7 +987,7 @@ impl eframe::App for App {
             }
         }
 
-        // ── Watch mode — inject when a watched process name appears ─────────────
+        // Watch mode — inject when a watched process name appears
         if !self.watch_names.is_empty() && !self.auto_inject_enabled {
             for w in all_windows.iter() {
                 let matched = self.watch_names.iter().any(|n| {
@@ -921,14 +1033,16 @@ impl eframe::App for App {
             if sort_asc { ord } else { ord.reverse() }
         });
 
-        // ── Help window ──────────────────────────────────────────────────────
+        // Help window
         render_help_window(ctx, &mut self.show_help, &mut self.help_section);
 
-        // ── Settings window ──────────────────────────────────────────────────
-        let mut toggle_startup_from_settings       = false;
-        let mut toggle_toast_from_settings         = false;
-        let mut toggle_hotkey_from_settings        = false;
+        // Settings window
+        let mut toggle_startup_from_settings          = false;
+        let mut toggle_toast_from_settings            = false;
+        let mut toggle_hotkey_from_settings           = false;
         let mut toggle_minimize_to_tray_from_settings = false;
+        let mut toggle_logging_from_settings          = false;
+        let mut open_log_file_from_settings           = false;
         render_settings_window(
             ctx,
             &mut self.show_settings,
@@ -936,13 +1050,16 @@ impl eframe::App for App {
             self.toast_enabled,
             self.hotkey_enabled,
             self.minimize_to_tray,
+            self.logging_enabled,
             &mut toggle_startup_from_settings,
             &mut toggle_toast_from_settings,
             &mut toggle_hotkey_from_settings,
             &mut toggle_minimize_to_tray_from_settings,
+            &mut toggle_logging_from_settings,
+            &mut open_log_file_from_settings,
         );
 
-        // ── Top bar ──────────────────────────────────────────────────────────
+        // Top bar
         // Collect actions here to avoid borrow conflicts
         let mut do_strip_all = false;
         let mut toggle_mode = false;
@@ -1193,6 +1310,28 @@ impl eframe::App for App {
             self.set_status_neutral(s);
             self.persist();
         }
+        if toggle_logging_from_settings {
+            self.logging_enabled = !self.logging_enabled;
+            let s = if self.logging_enabled {
+                "📋 Injection log file ON."
+            } else {
+                "📋 Injection log file OFF."
+            };
+            self.set_status_neutral(s);
+            self.persist();
+        }
+        if open_log_file_from_settings {
+            if let Some(path) = App::log_path() {
+                // Create the file if it doesn't exist yet so Explorer can open it.
+                if !path.exists() {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::File::create(&path);
+                }
+                let _ = std::process::Command::new("explorer").arg(&path).spawn();
+            }
+        }
         if add_watch {
             let name = self.watch_input.trim().to_string();
             if !name.is_empty() && !self.watch_names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
@@ -1237,7 +1376,7 @@ impl eframe::App for App {
             }
         }
 
-        // ── Status bar ───────────────────────────────────────────────────────
+        // Status bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -1275,7 +1414,7 @@ impl eframe::App for App {
             ui.add_space(4.0);
         });
 
-        // ── Injection log panel ──────────────────────────────────────────────
+        // Injection log panel
         if self.show_log {
             egui::TopBottomPanel::bottom("log_panel")
                 .resizable(true)
@@ -1312,7 +1451,7 @@ impl eframe::App for App {
                 });
         }
 
-        // ── Main table ───────────────────────────────────────────────────────
+        // Main table
         // Collect any row-level injection requests
         let mut inject_target: Option<WindowEntry> = None;
 
@@ -1447,7 +1586,7 @@ impl eframe::App for App {
             self.strip_window(&target);
         }
 
-        // ── Re-protection modal ──────────────────────────────────────────────
+        // Re-protection modal
         // Shown when a one-shot-stripped process has re-applied capture protection.
         if !self.reapply_alert.is_empty() {
             egui::Window::new("⚠️  Protection Re-applied")
@@ -1497,7 +1636,7 @@ impl eframe::App for App {
                 });
         }
 
-        // ── Apply modal actions ──────────────────────────────────────────────
+        // Apply modal actions
         if dismiss_reapply {
             self.reapply_alert.clear();
         }
@@ -1524,7 +1663,7 @@ impl eframe::App for App {
     }
 }
 
-// ── Help window ───────────────────────────────────────────────────────────────
+// Help window
 
 /// Render one body block line-by-line so egui doesn't collapse manual
 /// whitespace/indentation into a single wrapped paragraph.
@@ -1564,7 +1703,7 @@ fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize)
         .default_size([720.0, 540.0])
         .min_size([480.0, 340.0])
         .show(ctx, |ui| {
-            // ── Tab bar ──────────────────────────────────────────────────────
+            // Tab bar
             // Wraps automatically on narrow windows — no sidebar, no
             // horizontal_top, so the window never expands sideways.
             ui.horizontal_wrapped(|ui| {
@@ -1589,7 +1728,7 @@ fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize)
 
             ui.separator();
 
-            // ── Content area — full width, vertically scrollable ─────────────
+            // Content area — full width, vertically scrollable
             egui::ScrollArea::vertical()
                 .id_salt("help_content")
                 .auto_shrink([false, false])
@@ -1618,7 +1757,7 @@ fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize)
         });
 }
 
-// ── Settings window ───────────────────────────────────────────────────────────
+// Settings window
 
 #[allow(clippy::too_many_arguments)]
 fn render_settings_window(
@@ -1628,10 +1767,13 @@ fn render_settings_window(
     toast_enabled: bool,
     hotkey_enabled: bool,
     minimize_to_tray: bool,
+    logging_enabled: bool,
     toggle_startup: &mut bool,
     toggle_toast: &mut bool,
     toggle_hotkey: &mut bool,
     toggle_minimize_to_tray: &mut bool,
+    toggle_logging: &mut bool,
+    open_log_file: &mut bool,
 ) {
     if !*show {
         return;
@@ -1641,11 +1783,11 @@ fn render_settings_window(
         .open(show)
         .resizable(false)
         .collapsible(false)
-        .default_size([340.0, 310.0])
+        .default_size([340.0, 420.0])
         .show(ctx, |ui| {
             ui.add_space(4.0);
 
-            // ── Startup ───────────────────────────────────────────────────────
+            // Startup
             ui.label(RichText::new("Startup").strong().color(Color32::from_rgb(180, 180, 220)));
             ui.separator();
             ui.add_space(4.0);
@@ -1675,7 +1817,7 @@ fn render_settings_window(
             });
             ui.add_space(12.0);
 
-            // ── Notifications ─────────────────────────────────────────────────
+            // Notifications
             ui.label(RichText::new("Notifications").strong().color(Color32::from_rgb(180, 180, 220)));
             ui.separator();
             ui.add_space(4.0);
@@ -1704,7 +1846,7 @@ fn render_settings_window(
             });
             ui.add_space(12.0);
 
-            // ── Hotkey ────────────────────────────────────────────────────────
+            // Hotkey
             ui.label(RichText::new("Hotkey").strong().color(Color32::from_rgb(180, 180, 220)));
             ui.separator();
             ui.add_space(4.0);
@@ -1742,7 +1884,7 @@ fn render_settings_window(
             }
             ui.add_space(12.0);
 
-            // ── Window ────────────────────────────────────────────────────────
+            // Window
             ui.label(RichText::new("Window").strong().color(Color32::from_rgb(180, 180, 220)));
             ui.separator();
             ui.add_space(4.0);
@@ -1771,11 +1913,61 @@ fn render_settings_window(
                     *toggle_minimize_to_tray = true;
                 }
             });
+            ui.add_space(12.0);
+
+            // Logging
+            ui.label(RichText::new("Logging").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let log_label = if logging_enabled {
+                    "📋  Injection log file  (ON)"
+                } else {
+                    "📋  Injection log file  (OFF)"
+                };
+                let btn = egui::Button::new(log_label)
+                    .fill(if logging_enabled {
+                        Color32::from_rgb(30, 70, 50)
+                    } else {
+                        Color32::from_rgb(50, 50, 50)
+                    })
+                    .min_size([300.0, 28.0].into());
+                if ui
+                    .add(btn)
+                    .on_hover_text(
+                        "Append a timestamped entry to injection.log each time\n\
+                         a process is stripped, including mode and result.\n\
+                         Log is stored in %APPDATA%\\capture-bypass\\injection.log",
+                    )
+                    .clicked()
+                {
+                    *toggle_logging = true;
+                }
+            });
+            if logging_enabled {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    if ui
+                        .button("📂  Open log file")
+                        .on_hover_text("%APPDATA%\\capture-bypass\\injection.log")
+                        .clicked()
+                    {
+                        *open_log_file = true;
+                    }
+                });
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new("  %APPDATA%\\capture-bypass\\injection.log")
+                        .size(10.5)
+                        .color(Color32::from_rgb(110, 110, 150)),
+                );
+            }
             ui.add_space(4.0);
         });
 }
 
-// ── Status badge ──────────────────────────────────────────────────────────────
+// Status badge
 
 fn render_status_badge(ui: &mut Ui, affinity: u32) {
     match affinity {
@@ -1794,7 +1986,7 @@ fn render_status_badge(ui: &mut Ui, affinity: u32) {
     }
 }
 
-// ── Tray setup ────────────────────────────────────────────────────────────────
+// Tray setup
 
 fn build_tray() -> (
     Option<tray_icon::TrayIcon>,
@@ -1850,7 +2042,7 @@ fn build_tray() -> (
     }
 }
 
-// ── Window enumeration ────────────────────────────────────────────────────────
+// Window enumeration
 
 /// Callback state threaded through EnumWindows via lparam.
 struct EnumState {
@@ -1906,7 +2098,7 @@ fn enumerate_windows() -> Vec<WindowEntry> {
     state.entries
 }
 
-// ── Windows helpers ───────────────────────────────────────────────────────────
+// Windows helpers
 
 fn get_process_name(pid: u32) -> Option<String> {
     unsafe {
@@ -1963,7 +2155,7 @@ fn get_child_pids(parent_pid: u32) -> Vec<u32> {
     }
 }
 
-// ── Utilities ─────────────────────────────────────────────────────────────────
+// Utilities
 
 fn truncate(s: &str, max_chars: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -1974,7 +2166,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
-// ── Windows startup registry helpers ─────────────────────────────────────────
+// Windows startup registry helpers
 
 const STARTUP_RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
 const STARTUP_VALUE_NAME: &str = "capture-bypass";
@@ -2010,7 +2202,7 @@ fn write_startup_reg(enable: bool) -> bool {
     }
 }
 
-// ── Global hotkey helpers ─────────────────────────────────────────────────────
+// Global hotkey helpers
 
 fn register_hotkey(id: i32) {
     unsafe {
@@ -2029,7 +2221,7 @@ fn unregister_hotkey(id: i32) {
     }
 }
 
-// ── Toast notification helper ─────────────────────────────────────────────────
+// Toast notification helper
 // Uses a simple PowerShell one-liner so we don't need the WinRT COM machinery.
 
 fn send_toast(title: &str, body: &str) {
@@ -2050,7 +2242,7 @@ fn send_toast(title: &str, body: &str) {
         .spawn();
 }
 
-// ── Auto-update check ─────────────────────────────────────────────────────────
+// Auto-update check
 
 /// Parse "X.Y.Z" (with or without a leading 'v') into a comparable tuple.
 fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
@@ -2090,7 +2282,7 @@ fn check_for_update() -> Result<Option<String>, Box<dyn std::error::Error + Send
     }
 }
 
-// ── Process icon helpers ──────────────────────────────────────────────────────
+// Process icon helpers
 
 /// Resolve the full executable path from process name by scanning
 /// the window list process names — used to locate the exe for SHGetFileInfoW.
@@ -2212,7 +2404,7 @@ fn get_process_icon<'a>(
         .as_ref()
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+// Entry point
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {

@@ -19,11 +19,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Rust toolchain (x64 + x86) ───────────────────────────────────────
+      # ── 2. Rust toolchain (x64 + x86 + ARM64) ──────────────────────────────
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc,i686-pc-windows-msvc
+          targets: x86_64-pc-windows-msvc,i686-pc-windows-msvc,aarch64-pc-windows-msvc
 
       # ── 3. Cache compiled deps ───────────────────────────────────────────────
       - name: Cache Cargo registry & build artefacts
@@ -57,6 +57,18 @@ jobs:
             -p payload_dll_persistent `
             -p cli
 
+      # ── 5b. Build ARM64 (GUI + CLI + stress tester + both payload DLLs) ──────
+      - name: Build ARM64
+        shell: pwsh
+        run: |
+          $env:APP_VERSION = "${{ github.ref_name }}".TrimStart('v')
+          cargo build --release --target aarch64-pc-windows-msvc `
+            -p payload_dll `
+            -p payload_dll_persistent `
+            -p cli `
+            -p gui `
+            -p stress_tester
+
       # ── 6. Build Windows installer with Inno Setup ──────────────────────────
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
@@ -69,12 +81,14 @@ jobs:
             /DMyAppVersion=$version `
             installer\capture-bypass.iss
 
-      # ── 7. Package portable zip (used by Scoop) ──────────────────────────────
+      # ── 7. Package portable zips (x64 + ARM64, used by Scoop) ───────────────
       - name: Package portable zip
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}".TrimStart('v')
-          $stage   = "dist\portable"
+
+          # ── x64 ───────────────────────────────────────────────────────────────
+          $stage = "dist\portable"
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item target\release\capture_bypass_gui.exe     $stage\
           Copy-Item target\release\stress_tester.exe          $stage\
@@ -88,23 +102,41 @@ jobs:
           Compress-Archive -Path $stage\* `
             -DestinationPath "dist\capture-bypass-$version-portable-x64.zip"
 
+          # ── ARM64 ─────────────────────────────────────────────────────────────
+          $arm64 = "dist\portable-arm64"
+          New-Item -ItemType Directory -Force $arm64 | Out-Null
+          Copy-Item target\aarch64-pc-windows-msvc\release\capture_bypass_gui.exe     $arm64\
+          Copy-Item target\aarch64-pc-windows-msvc\release\stress_tester.exe          $arm64\
+          Copy-Item target\aarch64-pc-windows-msvc\release\payload_dll.dll            $arm64\
+          Copy-Item target\aarch64-pc-windows-msvc\release\payload_dll_persistent.dll $arm64\
+          # Include x86 DLLs — ARM64 Windows runs x86 processes via WoW64
+          if (Test-Path target\i686-pc-windows-msvc\release\payload_dll.dll) {
+            New-Item -ItemType Directory -Force $arm64\x86 | Out-Null
+            Copy-Item target\i686-pc-windows-msvc\release\payload_dll.dll             $arm64\x86\
+            Copy-Item target\i686-pc-windows-msvc\release\payload_dll_persistent.dll $arm64\x86\
+          }
+          Compress-Archive -Path $arm64\* `
+            -DestinationPath "dist\capture-bypass-$version-portable-arm64.zip"
+
       # ── 8. Checksums + release body + Scoop manifest ─────────────────────────
       - name: Generate release artifacts
         shell: pwsh
         run: |
-          $version  = "${{ github.ref_name }}".TrimStart('v')
+          $version   = "${{ github.ref_name }}".TrimStart('v')
           $installer = "capture-bypass-setup-$version-x64.exe"
           $portable  = "capture-bypass-$version-portable-x64.zip"
-          $hashInst  = (Get-FileHash "dist\$installer" -Algorithm SHA256).Hash.ToLower()
-          $hashPort  = (Get-FileHash "dist\$portable"  -Algorithm SHA256).Hash.ToLower()
+          $portArm64 = "capture-bypass-$version-portable-arm64.zip"
+          $hashInst   = (Get-FileHash "dist\$installer" -Algorithm SHA256).Hash.ToLower()
+          $hashPort   = (Get-FileHash "dist\$portable"  -Algorithm SHA256).Hash.ToLower()
+          $hashArm64  = (Get-FileHash "dist\$portArm64" -Algorithm SHA256).Hash.ToLower()
 
           # ── SHA256SUMS.txt ────────────────────────────────────────────────────
-          "$hashInst  $installer", "$hashPort  $portable" |
+          "$hashInst   $installer",
+          "$hashPort   $portable",
+          "$hashArm64  $portArm64" |
             Out-File dist\SHA256SUMS.txt -Encoding utf8NoBOM
 
           # ── Release body ──────────────────────────────────────────────────────
-          # Single-quoted strings preserve literal backticks for markdown fences.
-          # Double-quoted strings allow variable interpolation.
           $body = @(
             '# capture-bypass',
             '',
@@ -115,12 +147,12 @@ jobs:
             '## Requirements',
             '',
             '- Windows 10 version 2004 (build 19041) or later',
-            '- 64-bit system',
+            '- x64 **or** ARM64 (Snapdragon X / Surface) system',
             '- Administrator rights at runtime (UAC prompt on launch — no admin needed to install)',
             '',
             '## Install',
             '',
-            '**Installer** *(recommended)*',
+            '**Installer** *(recommended, x64)*',
             "Download and run ``$installer`` below.",
             '',
             '**Scoop**',
@@ -129,13 +161,17 @@ jobs:
             'scoop install capture-bypass',
             '```',
             '',
+            '**ARM64 (portable)**',
+            "Download ``$portArm64`` — native binary for Snapdragon X / Surface ARM64 devices.",
+            '',
             '## Verify before running',
             '',
             '```powershell',
             "Get-FileHash ``.\$installer`` -Algorithm SHA256",
             '```',
-            "**Expected SHA-256 (installer):** ``$hashInst``  ",
-            "**Expected SHA-256 (portable zip):** ``$hashPort``  ",
+            "**Expected SHA-256 (installer / x64):** ``$hashInst``  ",
+            "**Expected SHA-256 (portable x64):**    ``$hashPort``  ",
+            "**Expected SHA-256 (portable ARM64):**  ``$hashArm64``  ",
             '',
             "Full checksums are also in ``SHA256SUMS.txt``.",
             '',
@@ -144,11 +180,36 @@ jobs:
           $body -join "`n" | Out-File dist\release-body.txt -Encoding utf8NoBOM
 
           # ── Scoop manifest ────────────────────────────────────────────────────
+          $base = "https://github.com/Londopy/capture-bypass/releases/download/v$version"
           $manifest = Get-Content bucket\capture-bypass.json -Raw | ConvertFrom-Json
           $manifest.version = $version
-          $manifest.architecture.'64bit'.url  = `
-            "https://github.com/Londopy/capture-bypass/releases/download/v$version/$portable"
+
+          $manifest.architecture.'64bit'.url  = "$base/$portable"
           $manifest.architecture.'64bit'.hash = "sha256:$hashPort"
+
+          # Add / update arm64 architecture entry
+          $arm64entry = [PSCustomObject]@{
+            url  = "$base/$portArm64"
+            hash = "sha256:$hashArm64"
+          }
+          if ($manifest.architecture.PSObject.Properties['arm64']) {
+            $manifest.architecture.arm64 = $arm64entry
+          } else {
+            $manifest.architecture | Add-Member -NotePropertyName arm64 `
+                                                -NotePropertyValue $arm64entry
+          }
+
+          # Add / update arm64 autoupdate entry
+          $arm64auto = [PSCustomObject]@{
+            url = "$base/capture-bypass-`$version-portable-arm64.zip"
+          }
+          if ($manifest.autoupdate.architecture.PSObject.Properties['arm64']) {
+            $manifest.autoupdate.architecture.arm64 = $arm64auto
+          } else {
+            $manifest.autoupdate.architecture | Add-Member -NotePropertyName arm64 `
+                                                           -NotePropertyValue $arm64auto
+          }
+
           $manifest | ConvertTo-Json -Depth 10 |
             Out-File dist\scoop-manifest-updated.json -Encoding utf8NoBOM
 
@@ -177,4 +238,5 @@ jobs:
           files: |
             dist/capture-bypass-setup-*-x64.exe
             dist/capture-bypass-*-portable-x64.zip
+            dist/capture-bypass-*-portable-arm64.zip
             dist/SHA256SUMS.txt

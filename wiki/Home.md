@@ -8,7 +8,7 @@
 
 | Page | What's covered |
 |---|---|
-| [Installation & Build](Installation-and-Build) | Requirements, release downloads, building from source (x64 + x86) |
+| [Installation & Build](Installation-and-Build) | Requirements, release downloads, building from source (x64 + x86 + ARM64) |
 | [Usage Guide](Usage-Guide) | UI walkthrough — window list, filter, all toolbar buttons |
 | [Injection Modes](Injection-Modes) | One-shot vs Persistent — when to use each |
 | [Browser Injection](Browser-Injection) | Why browsers need multi-process injection and how it works |
@@ -21,10 +21,13 @@
 ## Quick start
 
 ```powershell
-# 1. Download capture-bypass-setup-X.Y.Z-x64.exe from the Releases page
-#    and run the installer — no Rust or build tools required.
-
-# 2. Launch from the desktop shortcut or Start Menu (runs as Administrator automatically).
+# 1. Download from the Releases page:
+#    - capture-bypass-setup-X.Y.Z-x64.exe  (installer, x64)
+#    - capture-bypass-X.Y.Z-portable-x64.zip  (portable, x64)
+#    - capture-bypass-X.Y.Z-portable-arm64.zip  (portable, ARM64 — Snapdragon X / Surface)
+#
+# 2. Run the installer or extract the zip.
+#    Launch from the desktop shortcut or Start Menu (runs as Administrator automatically).
 ```
 
 The app lists every visible window. Click **Strip Protection** on any protected row, or **⚡ Strip All Protected** to clear everything at once.

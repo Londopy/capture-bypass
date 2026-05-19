@@ -1,12 +1,8 @@
-//! payload_dll_persistent — like payload_dll but loops forever.
-//!
-//! Instead of stripping WDA protection once and exiting, the worker thread
-//! re-applies WDA_NONE every 500 ms for the lifetime of the host process.
-//! This handles apps that call SetWindowDisplayAffinity on a timer to fight
-//! back against one-shot injection.
-//!
-//! The loop runs until the host process exits — the thread is cleaned up
-//! automatically by Windows at process teardown.
+// payload_dll_persistent -- same as payload_dll but keeps looping.
+//
+// Instead of stripping once and exiting, the worker re-applies WDA_NONE
+// every 500 ms for as long as the host process is alive. Handles apps
+// that call SetWindowDisplayAffinity on a timer to fight back.
 
 use std::ffi::c_void;
 
@@ -37,9 +33,9 @@ pub unsafe extern "system" fn DllMain(
     TRUE
 }
 
-/// Loops indefinitely, stripping WDA protection every 500 ms.
+// Loops forever, clearing protection every 500 ms
 unsafe extern "system" fn worker_thread(_: *mut c_void) -> u32 {
-    // Initial pause — let the loader lock drop before we call into user32.
+    // Let the loader finish before we start touching user32
     Sleep(100);
 
     loop {

@@ -1,34 +1,20 @@
-//! stress_tester — self-protecting test window for capture-bypass.
-//!
-//! A standalone egui app for verifying capture-bypass injection.
-//!
-//! Features
-//! ─────────
-//! • Applies WDA_EXCLUDEFROMCAPTURE to itself on launch.
-//! • Background thread polls GetWindowDisplayAffinity every 100 ms and
-//!   updates the display without any external interaction.
-//!
-//! Fight mode
-//! ──────────
-//! Re-applies WDA_EXCLUDEFROMCAPTURE at a configurable interval (50–2000 ms),
-//! simulating apps that resist one-shot injection.
-//!
-//! Scenario A — Process enumeration (TH32CS_SNAPPROCESS)
-//! ────────────────────────────────────────────────────────
-//! Polls the process list for a configurable injector exe name.
-//! When the injector is found running, re-applies WDA_EXCLUDEFROMCAPTURE.
-//! Tests whether stealth renaming the injector (Scenario A defence) works.
-//!
-//! Scenario B — Module ejection (TH32CS_SNAPMODULE)
-//! ────────────────────────────────────────────────────
-//! Polls the process's own loaded module list every 250 ms.
-//! Any module whose name contains the configured pattern (default "payload_dll")
-//! or, optionally, any anonymous .tmp module, gets FreeLibrary'd immediately
-//! and protection is re-applied.
-//! Tests whether the stealth temp-copy approach defeats name-based DLL scanning.
-//!
-//! No Administrator rights required (SetWindowDisplayAffinity works on your
-//! own windows without elevation).
+// stress_tester -- self-protecting test window for verifying capture-bypass injection.
+//
+// Applies WDA_EXCLUDEFROMCAPTURE to itself on launch, then polls the affinity
+// every 100 ms so you can watch injection happen in real time.
+//
+// Fight mode: re-applies protection at a configurable interval (50-2000 ms).
+//   Simulates apps that fight back against one-shot injection.
+//
+// Scenario A: polls the running process list for the injector exe name.
+//   Re-applies protection if it sees the injector. Tests whether stealth
+//   renaming breaks process-name detection.
+//
+// Scenario B: polls this process's own module list every 250 ms.
+//   FreeLibrary's anything matching the pattern (or any .tmp if that option
+//   is ticked). Tests whether the stealth temp-copy survives name-based scanning.
+//
+// No admin needed -- SetWindowDisplayAffinity works on your own windows.
 
 // No console window in release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -62,8 +48,9 @@ extern "system" {
     fn FreeLibrary(hLibModule: *mut core::ffi::c_void) -> i32;
 }
 
-/// HWND is a raw pointer — wrap it so it's Send across threads.
-/// SAFETY: only used on our own window from a single Win32 call per thread.
+// HWND is a raw pointer, which isn't Send by default.
+// We only ever use it on our own window and only from one Win32 call at a time,
+// so wrapping it is fine here.
 #[derive(Clone, Copy)]
 struct SendHwnd(isize);
 unsafe impl Send for SendHwnd {}
@@ -109,7 +96,7 @@ fn find_hwnd_for_pid(target_pid: u32) -> Option<HWND> {
     state.found
 }
 
-/// Returns true if a process with `name` (case-insensitive) is currently running.
+// Check if a process with this name is running right now (case-insensitive)
 fn process_is_running(name: &str) -> bool {
     unsafe {
         let snap = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
@@ -134,10 +121,9 @@ fn process_is_running(name: &str) -> bool {
     }
 }
 
-/// Scans the module list of `pid` and calls FreeLibrary on every module whose
-/// name matches `pattern` (case-insensitive substring) or, if `also_tmp` is
-/// true, on every anonymous `.tmp` module.
-/// Returns the number of modules ejected.
+// Scan the module list of pid and FreeLibrary anything matching pattern
+// (case-insensitive substring). If also_tmp is true, also eject any .tmp module.
+// Returns how many modules got ejected.
 fn eject_matching_modules(pid: u32, pattern: &str, also_tmp: bool) -> u32 {
     let mut ejected = 0u32;
     unsafe {
