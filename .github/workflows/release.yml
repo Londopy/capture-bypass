@@ -167,7 +167,7 @@ jobs:
             '## Verify before running',
             '',
             '```powershell',
-            "Get-FileHash ``.\$installer`` -Algorithm SHA256",
+            "Get-FileHash ".\$installer" -Algorithm SHA256",
             '```',
             "**Expected SHA-256 (installer / x64):** ``$hashInst``  ",
             "**Expected SHA-256 (portable x64):**    ``$hashPort``  ",

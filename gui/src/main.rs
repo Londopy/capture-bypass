@@ -90,6 +90,8 @@ struct Config {
     minimize_to_tray: bool,
     #[serde(default)]
     logging_enabled: bool,
+    #[serde(default)]
+    discord_rpc_enabled: bool,
 }
 
 fn default_sort_col() -> u8 { 0 }
@@ -109,6 +111,7 @@ impl Default for Config {
             sort_asc: true,
             minimize_to_tray: true,
             logging_enabled: false,
+            discord_rpc_enabled: false,
         }
     }
 }
@@ -387,6 +390,16 @@ enum UpdateState {
     Failed,
 }
 
+// Discord RPC -- sent from the main thread to the RPC background thread
+// whenever something worth showing changes.
+struct RpcState {
+    auto_inject: bool,
+    persistent:  bool,
+    strip_count: u32,
+}
+
+const DISCORD_APP_ID: &str = "1506230832283648000";
+
 // App
 
 struct App {
@@ -458,6 +471,13 @@ struct App {
     minimize_to_tray: bool,
     // When true, each injection is appended to %APPDATA%\capture-bypass\injection.log
     logging_enabled: bool,
+
+    // Discord Rich Presence
+    discord_rpc_enabled: bool,
+    discord_rpc_running: Arc<AtomicBool>,
+    discord_rpc_tx: Option<std::sync::mpsc::SyncSender<RpcState>>,
+    // How many successful strips this session (shown in Discord status)
+    session_strip_count: Arc<std::sync::atomic::AtomicU32>,
 
     // Set by the off-thread tray watcher when the user clicks Open.
     tray_show: Arc<AtomicBool>,
@@ -577,6 +597,10 @@ impl App {
             tray_quit_id,
             minimize_to_tray: cfg.minimize_to_tray,
             logging_enabled: cfg.logging_enabled,
+            discord_rpc_enabled: cfg.discord_rpc_enabled,
+            discord_rpc_running: Arc::new(AtomicBool::new(false)),
+            discord_rpc_tx: None,
+            session_strip_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             tray_show,
             inject_tx,
             inject_rx,
@@ -586,6 +610,11 @@ impl App {
         if cfg.auto_inject {
             app.auto_inject_enabled = true;
             app.start_auto_inject();
+        }
+
+        // Restore Discord RPC if it was enabled
+        if cfg.discord_rpc_enabled {
+            app.start_discord_rpc();
         }
 
         app
@@ -779,6 +808,7 @@ impl App {
             sort_asc: self.sort_asc,
             minimize_to_tray: self.minimize_to_tray,
             logging_enabled: self.logging_enabled,
+            discord_rpc_enabled: self.discord_rpc_enabled,
         });
     }
 
@@ -908,6 +938,106 @@ impl App {
     fn stop_auto_inject(&mut self) {
         self.auto_inject_running.store(false, Ordering::Relaxed);
     }
+
+    // Discord Rich Presence
+
+    fn start_discord_rpc(&mut self) {
+        use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
+        use std::sync::mpsc;
+
+        if self.discord_rpc_running.load(Ordering::Relaxed) {
+            return;
+        }
+        self.discord_rpc_running.store(true, Ordering::Relaxed);
+
+        let (tx, rx) = mpsc::sync_channel::<RpcState>(8);
+        self.discord_rpc_tx = Some(tx);
+
+        let running = Arc::clone(&self.discord_rpc_running);
+        let strip_count = Arc::clone(&self.session_strip_count);
+
+        std::thread::Builder::new()
+            .name("discord-rpc".into())
+            .spawn(move || {
+                let mut client = match DiscordIpcClient::new(DISCORD_APP_ID) {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                if client.connect().is_err() {
+                    return;
+                }
+
+                // Push the initial presence right away
+                let count = strip_count.load(Ordering::Relaxed);
+                let _ = client.set_activity(
+                    activity::Activity::new()
+                        .details("capture-bypass")
+                        .state(&format!("Strips this session: {count}"))
+                        .buttons(vec![
+                            activity::Button::new(
+                                "Get capture-bypass",
+                                "https://github.com/Londopy/capture-bypass/releases/latest",
+                            ),
+                            activity::Button::new(
+                                "★ GitHub",
+                                "https://github.com/Londopy/capture-bypass",
+                            ),
+                        ]),
+                );
+
+                // Keep updating whenever the main thread sends a new state
+                while running.load(Ordering::Relaxed) {
+                    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                        Ok(state) => {
+                            let mode_str = if state.persistent { "persistent" } else { "one-shot" };
+                            let auto_str = if state.auto_inject { "auto-inject on" } else { "manual" };
+                            let status = format!("{auto_str} · {mode_str} · {strips} strips",
+                                strips = state.strip_count);
+                            let _ = client.set_activity(
+                                activity::Activity::new()
+                                    .details("capture-bypass")
+                                    .state(&status)
+                                    .buttons(vec![
+                                        activity::Button::new(
+                                            "Get capture-bypass",
+                                            "https://github.com/Londopy/capture-bypass/releases/latest",
+                                        ),
+                                        activity::Button::new(
+                                            "★ GitHub",
+                                            "https://github.com/Londopy/capture-bypass",
+                                        ),
+                                    ]),
+                            );
+                        }
+                        // Timeout just means no update — stay connected and loop
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        // Channel closed — main thread dropped the sender
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+
+                let _ = client.clear_activity();
+                let _ = client.close();
+            })
+            .ok();
+    }
+
+    fn stop_discord_rpc(&mut self) {
+        self.discord_rpc_running.store(false, Ordering::Relaxed);
+        // Dropping the sender unblocks the RPC thread's recv_timeout immediately
+        self.discord_rpc_tx = None;
+    }
+
+    // Send the current state to the RPC thread (no-op if RPC is off)
+    fn push_rpc_state(&self) {
+        if let Some(tx) = &self.discord_rpc_tx {
+            let _ = tx.try_send(RpcState {
+                auto_inject: self.auto_inject_enabled,
+                persistent:  self.persistent_mode,
+                strip_count: self.session_strip_count.load(Ordering::Relaxed),
+            });
+        }
+    }
 }
 
 // egui rendering
@@ -915,9 +1045,14 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Poll injection results
+        let mut rpc_needs_update = false;
         while let Ok(result) = self.inject_rx.try_recv() {
             if self.logging_enabled {
                 self.append_log_entry(&result.msg);
+            }
+            if result.ok {
+                self.session_strip_count.fetch_add(1, Ordering::Relaxed);
+                rpc_needs_update = true;
             }
             self.log_entries.push(LogEntry {
                 time: Instant::now(),
@@ -928,6 +1063,9 @@ impl eframe::App for App {
                 self.log_entries.remove(0);
             }
             self.set_status(result.msg, result.ok);
+        }
+        if rpc_needs_update {
+            self.push_rpc_state();
         }
 
         // Poll auto-update result
@@ -1043,6 +1181,7 @@ impl eframe::App for App {
         let mut toggle_minimize_to_tray_from_settings = false;
         let mut toggle_logging_from_settings          = false;
         let mut open_log_file_from_settings           = false;
+        let mut toggle_discord_rpc_from_settings      = false;
         render_settings_window(
             ctx,
             &mut self.show_settings,
@@ -1051,12 +1190,14 @@ impl eframe::App for App {
             self.hotkey_enabled,
             self.minimize_to_tray,
             self.logging_enabled,
+            self.discord_rpc_enabled,
             &mut toggle_startup_from_settings,
             &mut toggle_toast_from_settings,
             &mut toggle_hotkey_from_settings,
             &mut toggle_minimize_to_tray_from_settings,
             &mut toggle_logging_from_settings,
             &mut open_log_file_from_settings,
+            &mut toggle_discord_rpc_from_settings,
         );
 
         // Top bar
@@ -1096,7 +1237,13 @@ impl eframe::App for App {
                             .on_hover_text("Click to open the releases page")
                             .clicked()
                         {
-                            let _ = open::that("https://github.com/Londopy/capture-bypass/releases/latest");
+                            // open::that() silently fails when running as Administrator because
+                            // ShellExecute can't hand a URL off to a non-elevated browser process.
+                            // Routing through explorer.exe works because explorer runs at normal
+                            // user privilege and accepts URL arguments from elevated callers.
+                            let _ = std::process::Command::new("explorer.exe")
+                                .arg("https://github.com/Londopy/capture-bypass/releases/latest")
+                                .spawn();
                         }
                         ui.add_space(4.0);
                     }
@@ -1235,6 +1382,7 @@ impl eframe::App for App {
                 self.reapply_alert.clear();
             }
             self.persist();
+            self.push_rpc_state();
         }
         if toggle_auto {
             self.auto_inject_enabled = !self.auto_inject_enabled;
@@ -1246,6 +1394,7 @@ impl eframe::App for App {
                 self.set_status_neutral("Auto-inject disabled.");
             }
             self.persist();
+            self.push_rpc_state();
         }
         if manual_refresh {
             // Background thread handles refresh; just show feedback
@@ -1331,6 +1480,17 @@ impl eframe::App for App {
                 }
                 let _ = std::process::Command::new("explorer").arg(&path).spawn();
             }
+        }
+        if toggle_discord_rpc_from_settings {
+            self.discord_rpc_enabled = !self.discord_rpc_enabled;
+            if self.discord_rpc_enabled {
+                self.start_discord_rpc();
+                self.set_status_neutral("🎮 Discord Rich Presence ON.");
+            } else {
+                self.stop_discord_rpc();
+                self.set_status_neutral("🎮 Discord Rich Presence OFF.");
+            }
+            self.persist();
         }
         if add_watch {
             let name = self.watch_input.trim().to_string();
@@ -1768,12 +1928,14 @@ fn render_settings_window(
     hotkey_enabled: bool,
     minimize_to_tray: bool,
     logging_enabled: bool,
+    discord_rpc_enabled: bool,
     toggle_startup: &mut bool,
     toggle_toast: &mut bool,
     toggle_hotkey: &mut bool,
     toggle_minimize_to_tray: &mut bool,
     toggle_logging: &mut bool,
     open_log_file: &mut bool,
+    toggle_discord_rpc: &mut bool,
 ) {
     if !*show {
         return;
@@ -1963,6 +2125,43 @@ fn render_settings_window(
                         .color(Color32::from_rgb(110, 110, 150)),
                 );
             }
+            ui.add_space(8.0);
+
+            // Discord Rich Presence
+            ui.label(RichText::new("Discord").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let rpc_label = if discord_rpc_enabled {
+                    "🎮  Discord Rich Presence  (ON)"
+                } else {
+                    "🎮  Discord Rich Presence  (OFF)"
+                };
+                let btn = egui::Button::new(rpc_label)
+                    .fill(if discord_rpc_enabled {
+                        Color32::from_rgb(30, 45, 90)   // Discord blurple-ish
+                    } else {
+                        Color32::from_rgb(50, 50, 50)
+                    })
+                    .min_size([300.0, 28.0].into());
+                if ui
+                    .add(btn)
+                    .on_hover_text(
+                        "Show capture-bypass status in Discord.\n\
+                         Displays mode, auto-inject state, and strips\n\
+                         this session. Requires Discord to be running.",
+                    )
+                    .clicked()
+                {
+                    *toggle_discord_rpc = true;
+                }
+            });
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new("  Shows mode, auto-inject state, and strip count in Discord.")
+                    .size(10.5)
+                    .color(Color32::from_rgb(110, 110, 150)),
+            );
             ui.add_space(4.0);
         });
 }
