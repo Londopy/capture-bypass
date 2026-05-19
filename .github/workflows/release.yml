@@ -26,16 +26,28 @@ jobs:
           targets: x86_64-pc-windows-msvc,i686-pc-windows-msvc,aarch64-pc-windows-msvc
 
       # ── 3. Cache compiled deps ───────────────────────────────────────────────
-      - name: Cache Cargo registry & build artefacts
+      # Split into two entries:
+      #   a) registry  — downloaded crate source (~200 MB, shared across all arches,
+      #                  invalidates only when Cargo.lock changes)
+      #   b) target    — compiled artefacts for all three arches (~3-6 GB total,
+      #                  keyed separately so a dep update doesn't evict both at once)
+      - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            cargo-registry-
+
+      - name: Cache build artefacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
 
       # ── 4. Build x64 (GUI + CLI + stress tester + both payload DLLs) ─────────
       - name: Build x64

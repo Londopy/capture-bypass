@@ -959,8 +959,24 @@ impl App {
                 // the callback can safely call SCAN_WAKER.get() at any time.
                 scan_waker();
 
-                const EVENT_OBJECT_SHOW: u32 = 0x8002;
+                // EVENT_SYSTEM_FOREGROUND (0x0003): fires when the user switches
+                // to any window — catches protection that was already applied to
+                // an existing window before auto-inject started watching it.
+                // EVENT_OBJECT_SHOW (0x8002): fires when a new window appears.
+                // Together these cover both the "new window" and "switched to"
+                // cases without polling, keeping detection latency near zero.
+                const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
+                const EVENT_OBJECT_SHOW:       u32 = 0x8002;
 
+                let hook_fg = SetWinEventHook(
+                    EVENT_SYSTEM_FOREGROUND,
+                    EVENT_SYSTEM_FOREGROUND,
+                    None,
+                    Some(winevent_proc),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                );
                 let hook = SetWinEventHook(
                     EVENT_OBJECT_SHOW,
                     EVENT_OBJECT_SHOW,
@@ -984,10 +1000,9 @@ impl App {
                 }
 
                 // Unreachable in normal operation, but clean up properly.
-                if !hook.is_invalid() {
-                    use windows::Win32::UI::Accessibility::UnhookWinEvent;
-                    let _ = UnhookWinEvent(hook);
-                }
+                use windows::Win32::UI::Accessibility::UnhookWinEvent;
+                if !hook_fg.is_invalid() { let _ = UnhookWinEvent(hook_fg); }
+                if !hook.is_invalid()    { let _ = UnhookWinEvent(hook); }
             })
             .ok(); // non-critical — polling still works if spawn fails
 
@@ -1291,20 +1306,22 @@ impl App {
         std::thread::spawn(move || {
             // Per-PID state, entirely local to this thread — no Arc needed.
             //
-            // (process_name, used_persistent, gave_up)
+            // (process_name, used_persistent, gave_up, last_injected)
             //
-            //  gave_up = true  → OS-level block (MitigationPolicy); don't retry.
-            //  used_persistent = true → persistent DLL is active; protection
-            //      shouldn't return, but skip quietly if it does (transient).
-            //  Neither → one-shot injection succeeded; if protection comes back
-            //      for the same PID we escalate to persistent automatically.
-            let mut state: HashMap<u32, (String, bool, bool)> = HashMap::new();
+            //  gave_up = true   → OS-level block (MitigationPolicy); don't retry.
+            //  used_persistent  → persistent DLL was injected.  Give it a 2 s
+            //      grace period for the IAT hook to install + initial strip to
+            //      run.  After that, if protection is still visible, re-inject
+            //      (handles dynamic GetProcAddress callers and hook-install races).
+            //  Neither          → one-shot succeeded; re-protection → escalate.
+            let mut state: HashMap<u32, (String, bool, bool, std::time::Instant)> =
+                HashMap::new();
 
             while running.load(Ordering::Relaxed) {
                 // Wait for the next poll interval OR an immediate WinEvent
                 // wake-up, whichever comes first.  This makes auto-inject
-                // react to new windows in ~0 ms instead of up to 800 ms.
-                let sleep_ms = if fast_scan { 100 } else { 800 };
+                // react to new windows in ~0 ms instead of up to 400 ms.
+                let sleep_ms = if fast_scan { 100 } else { 400 };
                 let (lock, cvar) = scan_waker();
                 let guard = lock.lock().unwrap();
                 let _ = cvar.wait_timeout(guard, Duration::from_millis(sleep_ms));
@@ -1340,18 +1357,29 @@ impl App {
                             // Never seen this PID → use the user's global setting.
                             None => (persistent, false),
 
-                            // Persistent DLL already active — protection coming
-                            // back is transient (hook races); skip quietly.
-                            Some((_, true, _)) => continue,
+                            // Persistent DLL was injected.
+                            // Give it 2 s to install its IAT hook and run the
+                            // initial strip (the DLL sleeps 100 ms before that).
+                            // After the grace period, if protection is still
+                            // visible, re-inject — this catches callers that
+                            // resolve SetWindowDisplayAffinity via GetProcAddress
+                            // at runtime (bypassing the IAT hook entirely) and
+                            // any race during hook installation.
+                            Some((_, true, _, last)) => {
+                                if last.elapsed() < Duration::from_secs(2) {
+                                    continue; // still within grace period
+                                }
+                                (true, true) // re-inject persistent
+                            }
 
                             // OS policy blocked us — nothing more we can do.
-                            Some((_, _, true)) => continue,
+                            Some((_, _, true, _)) => continue,
 
                             // One-shot injection succeeded earlier but protection
                             // is back → the app re-applied it.  Escalate to the
                             // persistent DLL, which hooks SetWindowDisplayAffinity
                             // so the app can no longer reapply the flag.
-                            Some((_, false, false)) => (true, true),
+                            Some((_, false, false, _)) => (true, true),
                         };
 
                     // Apply per-process rule override for persistent/oneshot
@@ -1400,7 +1428,8 @@ impl App {
                                 };
                                 let msg = format!("{verb} {name} (PID {pid})");
                                 let _ = tx.send(InjResult { msg, ok: true });
-                                state.insert(pid, (name, use_persistent_for_this, false));
+                                state.insert(pid, (name, use_persistent_for_this, false,
+                                                   std::time::Instant::now()));
                             }
 
                             // OS-enforced block — nothing we can do in user-mode.
@@ -1410,7 +1439,8 @@ impl App {
                                     "⛔ {name} (PID {pid}) blocked by OS policy: {reason}"
                                 );
                                 let _ = tx.send(InjResult { msg, ok: false });
-                                state.insert(pid, (name, false, true));
+                                state.insert(pid, (name, false, true,
+                                                   std::time::Instant::now()));
                             }
 
                             // Other errors (privilege race, timing) — log only

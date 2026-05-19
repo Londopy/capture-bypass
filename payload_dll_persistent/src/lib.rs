@@ -290,7 +290,10 @@ unsafe extern "system" fn worker_thread(_: *mut c_void) -> u32 {
     let _ = EnumWindows(Some(strip_callback), LPARAM(pid as isize));
 
     loop {
-        Sleep(5_000);
+        // 500 ms is fast enough to catch dynamic GetProcAddress callers with
+        // no perceptible CPU overhead.  The IAT hook handles the zero-latency
+        // path for static callers; this loop is just the safety net.
+        Sleep(500);
         let pid = GetCurrentProcessId();
         let _ = EnumWindows(Some(strip_callback), LPARAM(pid as isize));
     }
