@@ -118,13 +118,17 @@ use windows::{
                 ProcessSignaturePolicy,
                 PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION,
                 PROCESS_VM_WRITE,
-                PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY,
-                PROCESS_MITIGATION_DYNAMIC_CODE_POLICY,
-                PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY,
             },
         },
     },
 };
+
+// The windows 0.58 crate doesn't export these structs in all configurations,
+// so we define them locally. Their layout is a single u32 bitfield -- stable
+// Windows ABI, documented in the SDK headers.
+#[repr(C)] struct MitigationBinarySignaturePolicy   { bitfield: u32 }
+#[repr(C)] struct MitigationDynamicCodePolicy       { bitfield: u32 }
+#[repr(C)] struct MitigationExtensionPointDisable   { bitfield: u32 }
 
 // inject_dll_stealth is what the CLI uses -- wraps inject_dll with the temp-copy
 // stealth trick. Returns a windows::core::Error on failure.
@@ -160,39 +164,36 @@ fn check_mitigation_policies(process: HANDLE) -> Option<String> {
 
     unsafe {
         // Only MS-signed DLLs allowed -- our unsigned DLL gets rejected by the loader
-        let mut sig =
-            std::mem::zeroed::<PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY>();
+        let mut sig = MitigationBinarySignaturePolicy { bitfield: 0 };
         if GetProcessMitigationPolicy(
             process,
             ProcessSignaturePolicy,
             std::ptr::addr_of_mut!(sig).cast(),
-            std::mem::size_of::<PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY>(),
-        ).is_ok() && (sig._bitfield & 0x1) != 0 {
+            std::mem::size_of::<MitigationBinarySignaturePolicy>(),
+        ).is_ok() && (sig.bitfield & 0x1) != 0 {
             reasons.push("requires Microsoft-signed DLLs (ProcessSignaturePolicy)");
         }
 
         // Blocks the LoadLibrary injection path at the AppInit/shim layer
-        let mut ext =
-            std::mem::zeroed::<PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY>();
+        let mut ext = MitigationExtensionPointDisable { bitfield: 0 };
         if GetProcessMitigationPolicy(
             process,
             ProcessExtensionPointDisablePolicy,
             std::ptr::addr_of_mut!(ext).cast(),
-            std::mem::size_of::<PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY>(),
-        ).is_ok() && (ext._bitfield & 0x1) != 0 {
+            std::mem::size_of::<MitigationExtensionPointDisable>(),
+        ).is_ok() && (ext.bitfield & 0x1) != 0 {
             reasons.push("blocks extension-point DLL loading \
                           (ProcessExtensionPointDisablePolicy)");
         }
 
         // No new executable memory allowed -- CreateRemoteThread won't work
-        let mut dyn_code =
-            std::mem::zeroed::<PROCESS_MITIGATION_DYNAMIC_CODE_POLICY>();
+        let mut dyn_code = MitigationDynamicCodePolicy { bitfield: 0 };
         if GetProcessMitigationPolicy(
             process,
             ProcessDynamicCodePolicy,
             std::ptr::addr_of_mut!(dyn_code).cast(),
-            std::mem::size_of::<PROCESS_MITIGATION_DYNAMIC_CODE_POLICY>(),
-        ).is_ok() && (dyn_code._bitfield & 0x1) != 0 {
+            std::mem::size_of::<MitigationDynamicCodePolicy>(),
+        ).is_ok() && (dyn_code.bitfield & 0x1) != 0 {
             reasons.push("prohibits dynamic code execution \
                           (ProcessDynamicCodePolicy)");
         }
