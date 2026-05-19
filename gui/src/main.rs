@@ -1107,28 +1107,36 @@ impl eframe::App for App {
             }
         }
 
-        // Poll download progress
-        if let Some(rx) = &self.download_rx {
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    DownloadMsg::Progress(p) => {
-                        self.download_state = DownloadState::Downloading(p);
-                    }
-                    DownloadMsg::Verifying => {
-                        self.download_state = DownloadState::Verifying;
-                    }
-                    DownloadMsg::Done(path) => {
-                        // Don't close automatically — show a Restart button instead.
-                        // The user picks when to restart, not us.
-                        self.download_state = DownloadState::Ready(path);
-                        self.download_rx = None;
-                    }
-                    DownloadMsg::Failed(e) => {
-                        self.download_state = DownloadState::Failed(e);
-                        self.download_rx = None;
-                    }
+        // Poll download progress.
+        // Drain into a local vec first so the borrow on self.download_rx ends
+        // before we need to write self.download_rx = None.
+        let download_msgs: Vec<DownloadMsg> = self.download_rx
+            .as_ref()
+            .map(|rx| std::iter::from_fn(|| rx.try_recv().ok()).collect())
+            .unwrap_or_default();
+        let mut clear_download_rx = false;
+        for msg in download_msgs {
+            match msg {
+                DownloadMsg::Progress(p) => {
+                    self.download_state = DownloadState::Downloading(p);
+                }
+                DownloadMsg::Verifying => {
+                    self.download_state = DownloadState::Verifying;
+                }
+                DownloadMsg::Done(path) => {
+                    // Don't close automatically — show a Restart button instead.
+                    // The user picks when to restart, not us.
+                    self.download_state = DownloadState::Ready(path);
+                    clear_download_rx = true;
+                }
+                DownloadMsg::Failed(e) => {
+                    self.download_state = DownloadState::Failed(e);
+                    clear_download_rx = true;
                 }
             }
+        }
+        if clear_download_rx {
+            self.download_rx = None;
         }
 
         // Poll global hotkey messages
@@ -2691,9 +2699,7 @@ fn start_download(
 fn sha256_of_file(path: &std::path::Path)
     -> Result<String, Box<dyn std::error::Error + Send + Sync>>
 {
-    use std::io::Read;
-    // Roll our own SHA-256 using the standard library isn't practical,
-    // but we can shell out to PowerShell which is always available on Windows.
+    // Shell out to PowerShell — it always has Get-FileHash on Windows.
     let out = std::process::Command::new("powershell")
         .args([
             "-NoProfile", "-Command",
