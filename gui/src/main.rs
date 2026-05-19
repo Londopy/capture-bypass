@@ -64,6 +64,23 @@ const BROWSER_NAMES: &[&str] = &[
     "thorium.exe",
 ];
 
+// Per-process rule types
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+enum ProcessRuleMode {
+    #[default]
+    AlwaysOneShot,
+    AlwaysPersistent,
+    Skip,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ProcessRule {
+    process_name: String,
+    #[serde(default)]
+    mode: ProcessRuleMode,
+}
+
 // Persistent config
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -99,6 +116,18 @@ struct Config {
     // Default = Ctrl+Shift (0x6).
     #[serde(default = "default_hotkey_mods")]
     hotkey_mods: u32,
+    #[serde(default)]
+    silent_startup: bool,
+    #[serde(default)]
+    fast_scan: bool,
+    #[serde(default)]
+    lifetime_strips: u64,
+    #[serde(default)]
+    strip_on_launch: bool,
+    #[serde(default)]
+    process_rules: Vec<ProcessRule>,
+    #[serde(default)]
+    exclusions: Vec<String>,
 }
 
 fn default_sort_col() -> u8 { 0 }
@@ -123,6 +152,12 @@ impl Default for Config {
             discord_rpc_enabled: false,
             hotkey_key: default_hotkey_key(),
             hotkey_mods: default_hotkey_mods(),
+            silent_startup: false,
+            fast_scan: false,
+            lifetime_strips: 0,
+            strip_on_launch: false,
+            process_rules: Vec::new(),
+            exclusions: Vec::new(),
         }
     }
 }
@@ -137,6 +172,14 @@ fn load_config() -> Config {
         None => return Config::default(),
     };
     let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Config::default(),
+    };
+    toml::from_str(&text).unwrap_or_default()
+}
+
+fn load_config_from_path(path: &std::path::Path) -> Config {
+    let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(_) => return Config::default(),
     };
@@ -495,12 +538,15 @@ struct App {
 
     // Toast notifications (auto-inject strips show a desktop notification)
     toast_enabled: bool,
+    // Notification grouping
+    toast_pending: Vec<String>,
+    toast_batch_deadline: Option<Instant>,
 
     // Process icon cache: process_name → egui TextureHandle
     icon_cache: HashMap<String, Option<egui::TextureHandle>>,
 
     // Tray (must stay alive for the duration of the app)
-    _tray_icon: Option<tray_icon::TrayIcon>,
+    tray_icon: Option<tray_icon::TrayIcon>,
     tray_open_id: Option<tray_icon::menu::MenuId>,
     tray_quit_id: Option<tray_icon::menu::MenuId>,
     // When true, X hides to tray instead of closing the process.
@@ -521,6 +567,34 @@ struct App {
     // Channel: background injection threads → UI
     inject_tx: Sender<InjResult>,
     inject_rx: Receiver<InjResult>,
+
+    // Tray state tracking
+    tray_was_protected: bool,
+
+    // Silent startup
+    silent_startup: bool,
+
+    // Fast scan
+    fast_scan: bool,
+    fast_scan_arc: Arc<AtomicBool>,
+
+    // Lifetime stats
+    lifetime_strips: u64,
+
+    // Strip on launch
+    strip_on_launch: bool,
+    strip_on_launch_pending: bool,
+
+    // Per-process rules
+    process_rules: Vec<ProcessRule>,
+    rule_input: String,
+    rule_mode_input: ProcessRuleMode,
+    auto_inject_rules: Arc<Mutex<Vec<ProcessRule>>>,
+
+    // Exclusion list
+    exclusions: Vec<String>,
+    exclusion_input: String,
+    auto_inject_exclusions: Arc<Mutex<Vec<String>>>,
 }
 
 impl App {
@@ -534,15 +608,19 @@ impl App {
 
         let shared_windows: Arc<Mutex<Vec<WindowEntry>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // Kick off background refresh thread (500 ms interval)
+        let fast_scan_arc_local: Arc<AtomicBool> = Arc::new(AtomicBool::new(cfg.fast_scan));
+
+        // Kick off background refresh thread (500 ms interval, or 100ms in fast scan)
         {
             let shared = Arc::clone(&shared_windows);
             let ctx = cc.egui_ctx.clone();
+            let fast_scan_flag = Arc::clone(&fast_scan_arc_local);
             std::thread::spawn(move || loop {
                 let windows = enumerate_windows();
                 *shared.lock().unwrap() = windows;
                 ctx.request_repaint();
-                std::thread::sleep(Duration::from_millis(500));
+                let sleep_ms = if fast_scan_flag.load(Ordering::Relaxed) { 100 } else { 500 };
+                std::thread::sleep(Duration::from_millis(sleep_ms));
             });
         }
 
@@ -597,6 +675,9 @@ impl App {
             });
         }
 
+        let auto_inject_rules_arc = Arc::new(Mutex::new(cfg.process_rules.clone()));
+        let auto_inject_exclusions_arc = Arc::new(Mutex::new(cfg.exclusions.clone()));
+
         let mut app = App {
             shared_windows,
             exe_dir,
@@ -633,8 +714,10 @@ impl App {
             download_rx: None,
             show_update_confirm: false,
             toast_enabled: cfg.toast_enabled,
+            toast_pending: Vec::new(),
+            toast_batch_deadline: None,
             icon_cache: HashMap::new(),
-            _tray_icon: tray_icon,
+            tray_icon,
             tray_open_id,
             tray_quit_id,
             minimize_to_tray: cfg.minimize_to_tray,
@@ -646,6 +729,20 @@ impl App {
             tray_show,
             inject_tx,
             inject_rx,
+            tray_was_protected: false,
+            silent_startup: cfg.silent_startup,
+            fast_scan: cfg.fast_scan,
+            fast_scan_arc: fast_scan_arc_local,
+            lifetime_strips: cfg.lifetime_strips,
+            strip_on_launch: cfg.strip_on_launch,
+            strip_on_launch_pending: cfg.strip_on_launch,
+            process_rules: cfg.process_rules.clone(),
+            rule_input: String::new(),
+            rule_mode_input: ProcessRuleMode::AlwaysOneShot,
+            auto_inject_rules: auto_inject_rules_arc,
+            exclusions: cfg.exclusions.clone(),
+            exclusion_input: String::new(),
+            auto_inject_exclusions: auto_inject_exclusions_arc,
         };
 
         // Restore auto-inject if it was running when the app last closed
@@ -853,6 +950,12 @@ impl App {
             discord_rpc_enabled: self.discord_rpc_enabled,
             hotkey_key: self.hotkey_key,
             hotkey_mods: self.hotkey_mods,
+            silent_startup: self.silent_startup,
+            fast_scan: self.fast_scan,
+            lifetime_strips: self.lifetime_strips,
+            strip_on_launch: self.strip_on_launch,
+            process_rules: self.process_rules.clone(),
+            exclusions: self.exclusions.clone(),
         });
     }
 
@@ -860,11 +963,13 @@ impl App {
 
     fn start_auto_inject(&mut self) {
         self.auto_inject_running.store(true, Ordering::Relaxed);
-        let running   = Arc::clone(&self.auto_inject_running);
-        let exe_dir   = self.exe_dir.clone();
+        let running    = Arc::clone(&self.auto_inject_running);
+        let exe_dir    = self.exe_dir.clone();
         let persistent = self.persistent_mode;
-        let tx        = self.inject_tx.clone();
-        let toast     = self.toast_enabled;
+        let tx         = self.inject_tx.clone();
+        let fast_scan  = self.fast_scan;
+        let rules      = Arc::clone(&self.auto_inject_rules);
+        let exclusions = Arc::clone(&self.auto_inject_exclusions);
 
         std::thread::spawn(move || {
             // Per-PID state, entirely local to this thread — no Arc needed.
@@ -879,7 +984,8 @@ impl App {
             let mut state: HashMap<u32, (String, bool, bool)> = HashMap::new();
 
             while running.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(800));
+                let sleep_ms = if fast_scan { 100 } else { 800 };
+                std::thread::sleep(Duration::from_millis(sleep_ms));
 
                 let windows = enumerate_windows();
 
@@ -890,6 +996,22 @@ impl App {
                 state.retain(|pid, _| live_pids.contains(pid));
 
                 for w in windows.iter().filter(|w| w.is_protected) {
+                    // Check exclusions
+                    {
+                        let excl = exclusions.lock().unwrap();
+                        if excl.iter().any(|e| e.eq_ignore_ascii_case(&w.process_name)) {
+                            drop(excl);
+                            continue;
+                        }
+                        drop(excl);
+                    }
+
+                    // Check per-process rules for Skip
+                    let rules_snap = rules.lock().unwrap().clone();
+                    if let Some(rule) = rules_snap.iter().find(|r| r.process_name.eq_ignore_ascii_case(&w.process_name)) {
+                        if rule.mode == ProcessRuleMode::Skip { continue; }
+                    }
+
                     // Decide what action (if any) to take
                     let (use_persistent, is_escalation) =
                         match state.get(&w.pid) {
@@ -910,7 +1032,13 @@ impl App {
                             Some((_, false, false)) => (true, true),
                         };
 
-                    let dll_name = if use_persistent {
+                    // Apply per-process rule override for persistent/oneshot
+                    let use_persistent_for_this = rules_snap.iter()
+                        .find(|r| r.process_name.eq_ignore_ascii_case(&w.process_name))
+                        .map(|r| r.mode == ProcessRuleMode::AlwaysPersistent)
+                        .unwrap_or(use_persistent);
+
+                    let dll_name = if use_persistent_for_this {
                         "payload_dll_persistent.dll"
                     } else {
                         "payload_dll.dll"
@@ -949,9 +1077,8 @@ impl App {
                                     "🤖 Auto-stripped"
                                 };
                                 let msg = format!("{verb} {name} (PID {pid})");
-                                if toast { send_toast("capture-bypass", &msg); }
                                 let _ = tx.send(InjResult { msg, ok: true });
-                                state.insert(pid, (name, use_persistent, false));
+                                state.insert(pid, (name, use_persistent_for_this, false));
                             }
 
                             // OS-enforced block — nothing we can do in user-mode.
@@ -1094,7 +1221,15 @@ impl eframe::App for App {
             }
             if result.ok {
                 self.session_strip_count.fetch_add(1, Ordering::Relaxed);
+                self.lifetime_strips += 1;
+                if self.lifetime_strips % 10 == 0 {
+                    self.persist();
+                }
                 rpc_needs_update = true;
+                self.toast_pending.push(result.msg.clone());
+                if self.toast_batch_deadline.is_none() {
+                    self.toast_batch_deadline = Some(Instant::now() + Duration::from_millis(400));
+                }
             }
             self.log_entries.push(LogEntry {
                 time: Instant::now(),
@@ -1105,6 +1240,22 @@ impl eframe::App for App {
                 self.log_entries.remove(0);
             }
             self.set_status(result.msg, result.ok);
+        }
+        // Toast batch flush
+        if let Some(deadline) = self.toast_batch_deadline {
+            if Instant::now() >= deadline {
+                if self.toast_enabled && !self.toast_pending.is_empty() {
+                    let msgs = std::mem::take(&mut self.toast_pending);
+                    if msgs.len() == 1 {
+                        send_toast("capture-bypass", &msgs[0]);
+                    } else {
+                        send_toast("capture-bypass", &format!("Stripped {} windows", msgs.len()));
+                    }
+                } else {
+                    self.toast_pending.clear();
+                }
+                self.toast_batch_deadline = None;
+            }
         }
         if rpc_needs_update {
             self.push_rpc_state();
@@ -1185,6 +1336,36 @@ impl eframe::App for App {
         // Snapshot current window list
         let all_windows: Vec<WindowEntry> = self.shared_windows.lock().unwrap().clone();
 
+        // Tray icon reacts to protection state
+        {
+            let any_protected = all_windows.iter().any(|w| w.is_protected);
+            if any_protected != self.tray_was_protected {
+                self.tray_was_protected = any_protected;
+                if let Some(ref tray) = self.tray_icon {
+                    if any_protected {
+                        if let Some(icon) = make_tray_icon(255, 0, 0) {
+                            let _ = tray.set_icon(Some(icon));
+                        }
+                        let _ = tray.set_tooltip(Some("capture-bypass — protected windows detected!"));
+                    } else {
+                        if let Some(icon) = make_tray_icon(0x44, 0x88, 0xFF) {
+                            let _ = tray.set_icon(Some(icon));
+                        }
+                        let _ = tray.set_tooltip(Some("capture-bypass"));
+                    }
+                }
+            }
+        }
+
+        // Strip on launch
+        if self.strip_on_launch_pending && !all_windows.is_empty() {
+            self.strip_on_launch_pending = false;
+            if all_windows.iter().any(|w| w.is_protected) {
+                self.strip_all_protected(&all_windows);
+                self.set_status("🚀 Launch strip: stripping all protected windows.".to_string(), true);
+            }
+        }
+
         // Detect re-applied protection on one-shot stripped processes
         // Only fires when NOT in persistent mode and NOT in auto-inject (which
         // would handle it silently).  Moves matching PIDs to reapply_alert so the
@@ -1248,6 +1429,9 @@ impl eframe::App for App {
         // Help window
         render_help_window(ctx, &mut self.show_help, &mut self.help_section);
 
+        // Compute n_prot early (used in filter bar and status bar)
+        let n_prot = all_windows.iter().filter(|w| w.is_protected).count();
+
         // Settings window
         let mut toggle_startup_from_settings          = false;
         let mut toggle_toast_from_settings            = false;
@@ -1257,6 +1441,15 @@ impl eframe::App for App {
         let mut open_log_file_from_settings           = false;
         let mut toggle_discord_rpc_from_settings      = false;
         let mut start_hotkey_recording                = false;
+        let mut toggle_silent_startup                 = false;
+        let mut toggle_fast_scan                      = false;
+        let mut toggle_strip_on_launch                = false;
+        let mut do_export_config                      = false;
+        let mut do_import_config                      = false;
+        let mut add_process_rule                      = false;
+        let mut remove_process_rule: Option<usize>    = None;
+        let mut add_exclusion                         = false;
+        let mut remove_exclusion: Option<usize>       = None;
         render_settings_window(
             ctx,
             &mut self.show_settings,
@@ -1269,6 +1462,14 @@ impl eframe::App for App {
             self.hotkey_mods,
             self.hotkey_key,
             self.hotkey_recording,
+            self.silent_startup,
+            self.fast_scan,
+            self.strip_on_launch,
+            &self.process_rules,
+            &mut self.rule_input,
+            &mut self.rule_mode_input,
+            &self.exclusions,
+            &mut self.exclusion_input,
             &mut toggle_startup_from_settings,
             &mut toggle_toast_from_settings,
             &mut toggle_hotkey_from_settings,
@@ -1277,6 +1478,15 @@ impl eframe::App for App {
             &mut open_log_file_from_settings,
             &mut toggle_discord_rpc_from_settings,
             &mut start_hotkey_recording,
+            &mut toggle_silent_startup,
+            &mut toggle_fast_scan,
+            &mut toggle_strip_on_launch,
+            &mut do_export_config,
+            &mut do_import_config,
+            &mut add_process_rule,
+            &mut remove_process_rule,
+            &mut add_exclusion,
+            &mut remove_exclusion,
         );
 
         // Update confirmation dialog
@@ -1536,6 +1746,13 @@ impl eframe::App for App {
                 if ui.add(auto_btn).clicked() {
                     toggle_auto = true;
                 }
+
+                ui.add_space(12.0);
+                if n_prot > 0 {
+                    ui.label(RichText::new(format!("🔴 {} protected", n_prot)).color(Color32::from_rgb(255, 80, 80)).strong());
+                } else {
+                    ui.label(RichText::new("🟢 0 protected").color(Color32::from_rgb(100, 200, 100)).weak());
+                }
             });
 
             // Watch mode row
@@ -1698,6 +1915,103 @@ impl eframe::App for App {
                 unregister_hotkey(self.hotkey_id);
             }
         }
+        if toggle_silent_startup {
+            self.silent_startup = !self.silent_startup;
+            let s = if self.silent_startup { "🤫 Silent startup ON." } else { "Silent startup OFF." };
+            self.set_status_neutral(s);
+            self.persist();
+        }
+        if toggle_fast_scan {
+            self.fast_scan = !self.fast_scan;
+            self.fast_scan_arc.store(self.fast_scan, Ordering::Relaxed);
+            let s = if self.fast_scan { "⚡ Fast scan ON (100ms)." } else { "Fast scan OFF (500ms)." };
+            self.set_status_neutral(s);
+            self.persist();
+        }
+        if toggle_strip_on_launch {
+            self.strip_on_launch = !self.strip_on_launch;
+            let s = if self.strip_on_launch { "🚀 Strip on launch ON." } else { "Strip on launch OFF." };
+            self.set_status_neutral(s);
+            self.persist();
+        }
+        if do_export_config {
+            match (config_path(), dirs_next::desktop_dir()) {
+                (Some(src), Some(desktop)) => {
+                    let dest = desktop.join("capture-bypass-config.toml");
+                    match std::fs::copy(&src, &dest) {
+                        Ok(_) => self.set_status("📤 Config exported to Desktop.", true),
+                        Err(e) => self.set_status(format!("✗ Export failed: {e}"), false),
+                    }
+                }
+                _ => self.set_status("✗ Could not determine config or desktop path.", false),
+            }
+        }
+        if do_import_config {
+            match dirs_next::desktop_dir() {
+                Some(desktop) => {
+                    let src = desktop.join("capture-bypass-config.toml");
+                    let imported = load_config_from_path(&src);
+                    self.persistent_mode   = imported.persistent_mode;
+                    self.protected_only    = imported.protected_only;
+                    self.toast_enabled     = imported.toast_enabled;
+                    self.hotkey_enabled    = imported.hotkey_enabled;
+                    self.show_log          = imported.show_log;
+                    self.watch_names       = imported.watch_names.clone();
+                    self.sort_col          = SortCol::from_u8(imported.sort_col);
+                    self.sort_asc          = imported.sort_asc;
+                    self.minimize_to_tray  = imported.minimize_to_tray;
+                    self.logging_enabled   = imported.logging_enabled;
+                    self.discord_rpc_enabled = imported.discord_rpc_enabled;
+                    self.hotkey_key        = imported.hotkey_key;
+                    self.hotkey_mods       = imported.hotkey_mods;
+                    self.silent_startup    = imported.silent_startup;
+                    self.fast_scan         = imported.fast_scan;
+                    self.fast_scan_arc.store(imported.fast_scan, Ordering::Relaxed);
+                    self.lifetime_strips   = imported.lifetime_strips;
+                    self.strip_on_launch   = imported.strip_on_launch;
+                    self.process_rules     = imported.process_rules.clone();
+                    *self.auto_inject_rules.lock().unwrap() = imported.process_rules.clone();
+                    self.exclusions        = imported.exclusions.clone();
+                    *self.auto_inject_exclusions.lock().unwrap() = imported.exclusions.clone();
+                    self.persist();
+                    self.set_status("📥 Config imported from Desktop.", true);
+                }
+                None => self.set_status("✗ Could not determine desktop path.", false),
+            }
+        }
+        if add_process_rule {
+            let name = self.rule_input.trim().to_string();
+            if !name.is_empty() && !self.process_rules.iter().any(|r| r.process_name.eq_ignore_ascii_case(&name)) {
+                let mode = self.rule_mode_input.clone();
+                self.process_rules.push(ProcessRule { process_name: name, mode });
+                self.rule_input.clear();
+                *self.auto_inject_rules.lock().unwrap() = self.process_rules.clone();
+                self.persist();
+            }
+        }
+        if let Some(idx) = remove_process_rule {
+            if idx < self.process_rules.len() {
+                self.process_rules.remove(idx);
+                *self.auto_inject_rules.lock().unwrap() = self.process_rules.clone();
+                self.persist();
+            }
+        }
+        if add_exclusion {
+            let name = self.exclusion_input.trim().to_string();
+            if !name.is_empty() && !self.exclusions.iter().any(|e| e.eq_ignore_ascii_case(&name)) {
+                self.exclusions.push(name);
+                self.exclusion_input.clear();
+                *self.auto_inject_exclusions.lock().unwrap() = self.exclusions.clone();
+                self.persist();
+            }
+        }
+        if let Some(idx) = remove_exclusion {
+            if idx < self.exclusions.len() {
+                self.exclusions.remove(idx);
+                *self.auto_inject_exclusions.lock().unwrap() = self.exclusions.clone();
+                self.persist();
+            }
+        }
 
         // Capture new hotkey combo when in recording mode
         if self.hotkey_recording {
@@ -1800,12 +2114,12 @@ impl eframe::App for App {
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let n_prot = all_windows.iter().filter(|w| w.is_protected).count();
                     let n_32 = all_windows.iter().filter(|w| w.is_32bit).count();
                     ui.label(
                         RichText::new(format!(
-                            "v{}  •  {} windows  •  {} protected  •  {} 32-bit",
+                            "v{}  •  {} lifetime  •  {} windows  •  {} protected  •  {} 32-bit",
                             env!("CARGO_PKG_VERSION"),
+                            self.lifetime_strips,
                             all_windows.len(),
                             n_prot,
                             n_32
@@ -2040,6 +2354,11 @@ impl eframe::App for App {
                 });
         }
 
+        // Request repaint for pending toast batch
+        if self.toast_batch_deadline.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
         // Apply modal actions
         if dismiss_reapply {
             self.reapply_alert.clear();
@@ -2176,6 +2495,14 @@ fn render_settings_window(
     hotkey_mods: u32,
     hotkey_key: u32,
     hotkey_recording: bool,
+    silent_startup: bool,
+    fast_scan: bool,
+    strip_on_launch: bool,
+    process_rules: &[ProcessRule],
+    rule_input: &mut String,
+    rule_mode_input: &mut ProcessRuleMode,
+    exclusions: &[String],
+    exclusion_input: &mut String,
     toggle_startup: &mut bool,
     toggle_toast: &mut bool,
     toggle_hotkey: &mut bool,
@@ -2184,6 +2511,15 @@ fn render_settings_window(
     open_log_file: &mut bool,
     toggle_discord_rpc: &mut bool,
     start_hotkey_recording: &mut bool,
+    toggle_silent_startup: &mut bool,
+    toggle_fast_scan: &mut bool,
+    toggle_strip_on_launch: &mut bool,
+    do_export_config: &mut bool,
+    do_import_config: &mut bool,
+    add_process_rule: &mut bool,
+    remove_process_rule: &mut Option<usize>,
+    add_exclusion: &mut bool,
+    remove_exclusion: &mut Option<usize>,
 ) {
     if !*show {
         return;
@@ -2191,10 +2527,11 @@ fn render_settings_window(
 
     egui::Window::new("⚙  Settings")
         .open(show)
-        .resizable(false)
+        .resizable(true)
         .collapsible(false)
-        .default_size([340.0, 420.0])
+        .default_size([400.0, 600.0])
         .show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(4.0);
 
             // Startup
@@ -2223,6 +2560,26 @@ fn render_settings_window(
                     .clicked()
                 {
                     *toggle_startup = true;
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let label = if silent_startup { "🤫  Silent startup  (ON)" } else { "🤫  Silent startup  (OFF)" };
+                let btn = egui::Button::new(label)
+                    .fill(if silent_startup { Color32::from_rgb(50, 60, 90) } else { Color32::from_rgb(50, 50, 50) })
+                    .min_size([300.0, 28.0].into());
+                if ui.add(btn).on_hover_text("Start minimized to tray without showing the window.").clicked() {
+                    *toggle_silent_startup = true;
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let label = if strip_on_launch { "🚀  Strip all on launch  (ON)" } else { "🚀  Strip all on launch  (OFF)" };
+                let btn = egui::Button::new(label)
+                    .fill(if strip_on_launch { Color32::from_rgb(80, 50, 20) } else { Color32::from_rgb(50, 50, 50) })
+                    .min_size([300.0, 28.0].into());
+                if ui.add(btn).on_hover_text("Automatically strip all protected windows on startup.").clicked() {
+                    *toggle_strip_on_launch = true;
                 }
             });
             ui.add_space(12.0);
@@ -2431,7 +2788,105 @@ fn render_settings_window(
                     .size(10.5)
                     .color(Color32::from_rgb(110, 110, 150)),
             );
+            ui.add_space(8.0);
+
+            // Detection
+            ui.label(RichText::new("Detection").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.separator();
             ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let label = if fast_scan { "⚡  Fast scan — 100ms  (ON)" } else { "⚡  Fast scan — 100ms  (OFF)" };
+                let btn = egui::Button::new(label)
+                    .fill(if fast_scan { Color32::from_rgb(80, 70, 10) } else { Color32::from_rgb(50, 50, 50) })
+                    .min_size([300.0, 28.0].into());
+                if ui.add(btn).on_hover_text("Scan every 100ms instead of 500ms. Uses more CPU.").clicked() {
+                    *toggle_fast_scan = true;
+                }
+            });
+            ui.add_space(12.0);
+
+            // Per-process Rules
+            ui.label(RichText::new("Per-process Rules").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(rule_input).desired_width(130.0).hint_text("process.exe"));
+                let mode_label = match rule_mode_input {
+                    ProcessRuleMode::AlwaysOneShot    => "One-shot",
+                    ProcessRuleMode::AlwaysPersistent => "Persistent",
+                    ProcessRuleMode::Skip             => "Skip",
+                };
+                if ui.button(mode_label).clicked() {
+                    *rule_mode_input = match rule_mode_input {
+                        ProcessRuleMode::AlwaysOneShot    => ProcessRuleMode::AlwaysPersistent,
+                        ProcessRuleMode::AlwaysPersistent => ProcessRuleMode::Skip,
+                        ProcessRuleMode::Skip             => ProcessRuleMode::AlwaysOneShot,
+                    };
+                }
+                if ui.button("➕").clicked() {
+                    *add_process_rule = true;
+                }
+            });
+            ui.add_space(4.0);
+            let rules_snapshot: Vec<(usize, String, String)> = process_rules.iter().enumerate()
+                .map(|(i, r)| {
+                    let mode_str = match r.mode {
+                        ProcessRuleMode::AlwaysOneShot    => "One-shot",
+                        ProcessRuleMode::AlwaysPersistent => "Persistent",
+                        ProcessRuleMode::Skip             => "Skip",
+                    };
+                    (i, r.process_name.clone(), mode_str.to_string())
+                })
+                .collect();
+            for (i, name, mode_str) in rules_snapshot {
+                ui.horizontal(|ui| {
+                    ui.label(format!("[{name}]  [{mode_str}]"));
+                    if ui.small_button("✕").clicked() {
+                        *remove_process_rule = Some(i);
+                    }
+                });
+            }
+            ui.add_space(12.0);
+
+            // Exclusions
+            ui.label(RichText::new("Exclusions").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(exclusion_input).desired_width(150.0).hint_text("process.exe"));
+                if ui.button("➕ Add").clicked() {
+                    *add_exclusion = true;
+                }
+            });
+            ui.add_space(4.0);
+            let excl_snapshot: Vec<(usize, String)> = exclusions.iter().enumerate()
+                .map(|(i, e)| (i, e.clone()))
+                .collect();
+            for (i, name) in excl_snapshot {
+                ui.horizontal(|ui| {
+                    ui.label(format!("[{name}]"));
+                    if ui.small_button("✕").clicked() {
+                        *remove_exclusion = Some(i);
+                    }
+                });
+            }
+            ui.add_space(12.0);
+
+            // Config export/import
+            ui.label(RichText::new("Config").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("📤 Export").on_hover_text("Export config to Desktop as capture-bypass-config.toml").clicked() {
+                    *do_export_config = true;
+                }
+                ui.add_space(8.0);
+                if ui.button("📥 Import").on_hover_text("Import config from Desktop capture-bypass-config.toml").clicked() {
+                    *do_import_config = true;
+                }
+            });
+            ui.add_space(4.0);
+            }); // end ScrollArea
         });
 }
 
@@ -2455,6 +2910,18 @@ fn render_status_badge(ui: &mut Ui, affinity: u32) {
 }
 
 // Tray setup
+
+fn make_tray_icon(r: u8, g: u8, b: u8) -> Option<tray_icon::Icon> {
+    let size: u32 = 32;
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    for i in 0..(size * size) as usize {
+        rgba[i * 4]     = r;
+        rgba[i * 4 + 1] = g;
+        rgba[i * 4 + 2] = b;
+        rgba[i * 4 + 3] = 0xFF;
+    }
+    tray_icon::Icon::from_rgba(rgba, size, size).ok()
+}
 
 fn build_tray() -> (
     Option<tray_icon::TrayIcon>,
@@ -2744,29 +3211,37 @@ fn unregister_hotkey(id: i32) {
 // Uses a simple PowerShell one-liner so we don't need the WinRT COM machinery.
 
 fn send_toast(title: &str, body: &str) {
-    // Windows toast notifications require a registered AUMID.
-    // Using PowerShell's own AUMID is the most reliable approach — it's always
-    // registered on every Windows 10/11 machine regardless of how the app was
-    // installed. The notification shows with a PowerShell icon but the title
-    // and body are fully customisable.
-    let aumid = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe";
+    // WinRT ToastNotificationManager silently fails when called from an
+    // elevated (Administrator) process — Windows blocks the notification
+    // queue for admin tokens in many Windows 10/11 configurations.
+    //
+    // System.Windows.Forms.NotifyIcon.ShowBalloonTip() takes the Win32
+    // Shell_NotifyIcon path and reliably works from elevated processes.
+    // It briefly shows a secondary tray icon while the balloon is visible,
+    // then cleans itself up.  System.Windows.Forms is always available via
+    // .NET Framework on Windows 10/11 (PowerShell 5 runs on .NET 4.x).
+    //
+    // Single-quote the values so PowerShell treats them literally — no
+    // variable expansion, no escaping headaches.  The only character that
+    // needs escaping inside PS single-quoted strings is ' itself → ''.
+    let title_ps = title.replace('\'', "''");
+    let body_ps  = body.replace('\'',  "''");
     let script = format!(
-        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, \
-         ContentType = WindowsRuntime] | Out-Null; \
-         $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(\
-           [Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
-         $template.GetElementsByTagName('text')[0].AppendChild(\
-           $template.CreateTextNode('{title}')) | Out-Null; \
-         $template.GetElementsByTagName('text')[1].AppendChild(\
-           $template.CreateTextNode('{body}')) | Out-Null; \
-         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{aumid}')\
-           .Show([Windows.UI.Notifications.ToastNotification]::new($template))",
-        title = title.replace('\'', ""),
-        body  = body.replace('\'', ""),
-        aumid = aumid,
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         Add-Type -AssemblyName System.Drawing; \
+         $n = New-Object System.Windows.Forms.NotifyIcon; \
+         $n.Icon = [System.Drawing.SystemIcons]::Information; \
+         $n.BalloonTipIcon  = 'Info'; \
+         $n.BalloonTipTitle = '{title_ps}'; \
+         $n.BalloonTipText  = '{body_ps}'; \
+         $n.Visible = $true; \
+         $n.ShowBalloonTip(5000); \
+         Start-Sleep -Seconds 6; \
+         $n.Dispose()"
     );
     let _ = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+               "-Command", &script])
         .spawn();
 }
 
@@ -3085,11 +3560,19 @@ fn get_process_icon<'a>(
 // Entry point
 
 fn main() -> eframe::Result<()> {
+    let cfg = load_config();
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("capture-bypass")
+        .with_inner_size([1100.0, 650.0])
+        .with_min_inner_size([900.0, 550.0]);
+
+    if cfg.silent_startup {
+        viewport = viewport.with_visible(false);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("capture-bypass")
-            .with_inner_size([1100.0, 650.0])
-            .with_min_inner_size([900.0, 550.0]),
+        viewport,
         ..Default::default()
     };
 
