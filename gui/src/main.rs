@@ -390,6 +390,23 @@ enum UpdateState {
     Failed,
 }
 
+// Auto-update download state (shown in the header)
+enum DownloadState {
+    Idle,
+    Downloading(f32),               // 0.0 – 1.0
+    Verifying,
+    Ready(std::path::PathBuf),      // verified, waiting for user to click Restart
+    Failed(String),
+}
+
+// Messages from the download thread back to the UI thread
+enum DownloadMsg {
+    Progress(f32),
+    Verifying,
+    Done(std::path::PathBuf),
+    Failed(String),
+}
+
 // Discord RPC -- sent from the main thread to the RPC background thread
 // whenever something worth showing changes.
 struct RpcState {
@@ -456,6 +473,9 @@ struct App {
     // Auto-update
     update_state: Option<UpdateState>,
     update_rx: Option<Receiver<UpdateState>>,
+    // Download-and-install flow
+    download_state: DownloadState,
+    download_rx: Option<Receiver<DownloadMsg>>,
 
     // Toast notifications (auto-inject strips show a desktop notification)
     toast_enabled: bool,
@@ -590,6 +610,8 @@ impl App {
             hotkey_id,
             update_state: None,
             update_rx: Some(update_rx),
+            download_state: DownloadState::Idle,
+            download_rx: None,
             toast_enabled: cfg.toast_enabled,
             icon_cache: HashMap::new(),
             _tray_icon: tray_icon,
@@ -1066,10 +1088,46 @@ impl eframe::App for App {
             self.push_rpc_state();
         }
 
-        // Poll auto-update result
+        // Poll auto-update result — start download immediately on detection
         if let Some(rx) = &self.update_rx {
             while let Ok(state) = rx.try_recv() {
+                if let UpdateState::Available(ref tag) = state {
+                    // Kick off the background download right away — no button click needed.
+                    // By the time the user sees the notification it'll already be partway done.
+                    if self.download_rx.is_none() {
+                        start_download(
+                            tag.clone(),
+                            &mut self.download_state,
+                            &mut self.download_rx,
+                            &self.exe_dir,
+                        );
+                    }
+                }
                 self.update_state = Some(state);
+            }
+        }
+
+        // Poll download progress
+        if let Some(rx) = &self.download_rx {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    DownloadMsg::Progress(p) => {
+                        self.download_state = DownloadState::Downloading(p);
+                    }
+                    DownloadMsg::Verifying => {
+                        self.download_state = DownloadState::Verifying;
+                    }
+                    DownloadMsg::Done(path) => {
+                        // Don't close automatically — show a Restart button instead.
+                        // The user picks when to restart, not us.
+                        self.download_state = DownloadState::Ready(path);
+                        self.download_rx = None;
+                    }
+                    DownloadMsg::Failed(e) => {
+                        self.download_state = DownloadState::Failed(e);
+                        self.download_rx = None;
+                    }
+                }
             }
         }
 
@@ -1226,23 +1284,70 @@ impl eframe::App for App {
                     }
                     ui.add_space(4.0);
 
-                    // Update available notification
+                    // Update header — download starts automatically, user only clicks once at the end.
                     if let Some(UpdateState::Available(tag)) = &self.update_state {
                         let tag = tag.clone();
-                        if ui
-                            .add(egui::Button::new(format!("🆕 v{tag} available"))
-                                .fill(Color32::from_rgb(80, 50, 10)))
-                            .on_hover_text("Click to open the releases page")
-                            .clicked()
-                        {
-                            // open::that() silently fails when running as Administrator because
-                            // ShellExecute can't hand a URL off to a non-elevated browser process.
-                            // Routing through explorer.exe works because explorer runs at normal
-                            // user privilege and accepts URL arguments from elevated callers.
-                            let _ = std::process::Command::new("explorer.exe")
-                                .arg("https://github.com/Londopy/capture-bypass/releases/latest")
-                                .spawn();
+                        let do_restart = match &self.download_state {
+                            // Downloading silently in the background
+                            DownloadState::Idle => {
+                                ui.add(egui::Button::new(format!("🆕 v{tag}"))
+                                    .fill(Color32::from_rgb(60, 40, 10)))
+                                    .on_hover_text("Preparing download…");
+                                false
+                            }
+                            DownloadState::Downloading(pct) => {
+                                let pct = *pct;
+                                let label = if pct > 0.0 {
+                                    format!("⬇ {:.0}%", pct * 100.0)
+                                } else {
+                                    "⬇ …".to_string()
+                                };
+                                ui.add(egui::Button::new(label)
+                                    .fill(Color32::from_rgb(25, 55, 15)))
+                                    .on_hover_text(format!("Downloading v{tag} in the background…"));
+                                false
+                            }
+                            DownloadState::Verifying => {
+                                ui.add(egui::Button::new("🔍 …")
+                                    .fill(Color32::from_rgb(15, 45, 65)))
+                                    .on_hover_text("Verifying download…");
+                                false
+                            }
+                            // The one click the user ever needs
+                            DownloadState::Ready(_) => {
+                                ui.add(egui::Button::new(format!("🔄 Restart to update"))
+                                    .fill(Color32::from_rgb(20, 80, 30)))
+                                    .on_hover_text(
+                                        format!("v{tag} is ready — click to install and relaunch")
+                                    )
+                                    .clicked()
+                            }
+                            DownloadState::Failed(e) => {
+                                let e = e.clone();
+                                if ui.add(egui::Button::new("✗ Retry update?")
+                                        .fill(Color32::from_rgb(80, 15, 15)))
+                                    .on_hover_text(e)
+                                    .clicked()
+                                {
+                                    start_download(tag, &mut self.download_state,
+                                                   &mut self.download_rx, &self.exe_dir);
+                                }
+                                false
+                            }
+                        };
+
+                        if do_restart {
+                            // Take the path out of the Ready state so we can use it
+                            if let DownloadState::Ready(path) =
+                                std::mem::replace(&mut self.download_state, DownloadState::Idle)
+                            {
+                                let _ = std::process::Command::new(&path)
+                                    .args(["/SILENT", "/RESTARTAPPLICATIONS"])
+                                    .spawn();
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
                         }
+
                         ui.add_space(4.0);
                     }
 
@@ -2452,6 +2557,158 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
         .map(|p| p.split('-').next().unwrap_or(p))
         .and_then(|p| p.parse().ok())?;
     Some((major, minor, patch))
+}
+
+// Kick off the background installer download.
+// Detects installer vs portable; portable users get the browser instead.
+fn start_download(
+    tag: String,
+    download_state: &mut DownloadState,
+    download_rx: &mut Option<Receiver<DownloadMsg>>,
+    exe_dir: &std::path::Path,
+) {
+    // Portable installs have no unins000.exe next to them.
+    // We can't self-update a portable safely, so just open the releases page.
+    if !exe_dir.join("unins000.exe").exists() {
+        let _ = std::process::Command::new("explorer.exe")
+            .arg("https://github.com/Londopy/capture-bypass/releases/latest")
+            .spawn();
+        return;
+    }
+
+    *download_state = DownloadState::Downloading(0.0);
+    let (tx, rx) = mpsc::channel::<DownloadMsg>();
+    *download_rx = Some(rx);
+
+    // Detect architecture — ARM64 native build gets the arm64 installer
+    #[cfg(target_arch = "aarch64")]
+    let arch_suffix = "arm64";
+    #[cfg(not(target_arch = "aarch64"))]
+    let arch_suffix = "x64";
+
+    std::thread::Builder::new()
+        .name("update-download".into())
+        .spawn(move || {
+            let url = format!(
+                "https://github.com/Londopy/capture-bypass/releases/download/v{tag}/\
+                 capture-bypass-setup-{tag}-{arch_suffix}.exe"
+            );
+            let dest = std::env::temp_dir()
+                .join(format!("capture-bypass-update-{tag}.exe"));
+
+            // Download with progress
+            let resp = match ureq::get(&url)
+                .set("User-Agent", &format!("capture-bypass/{}", env!("CARGO_PKG_VERSION")))
+                .call()
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(DownloadMsg::Failed(format!("Download failed: {e}")));
+                    return;
+                }
+            };
+
+            let total = resp.header("content-length")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+
+            let mut reader = resp.into_reader();
+            let mut file = match std::fs::File::create(&dest) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = tx.send(DownloadMsg::Failed(format!("Can't create temp file: {e}")));
+                    return;
+                }
+            };
+
+            let mut downloaded: u64 = 0;
+            let mut buf = vec![0u8; 65_536];
+            loop {
+                let n = match std::io::Read::read(&mut reader, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) => {
+                        let _ = tx.send(DownloadMsg::Failed(format!("Read error: {e}")));
+                        return;
+                    }
+                };
+                if let Err(e) = std::io::Write::write_all(&mut file, &buf[..n]) {
+                    let _ = tx.send(DownloadMsg::Failed(format!("Write error: {e}")));
+                    return;
+                }
+                downloaded += n as u64;
+                if total > 0 {
+                    let _ = tx.send(DownloadMsg::Progress(downloaded as f32 / total as f32));
+                }
+            }
+            drop(file);
+
+            // Verify SHA256 against the release's SHA256SUMS.txt
+            let _ = tx.send(DownloadMsg::Verifying);
+            let sums_url = format!(
+                "https://github.com/Londopy/capture-bypass/releases/download/v{tag}/SHA256SUMS.txt"
+            );
+            if let Ok(sums_resp) = ureq::get(&sums_url)
+                .set("User-Agent", &format!("capture-bypass/{}", env!("CARGO_PKG_VERSION")))
+                .call()
+            {
+                if let Ok(body) = sums_resp.into_string() {
+                    // Each line: "<hash>  <filename>"
+                    let installer_name = format!("capture-bypass-setup-{tag}-{arch_suffix}.exe");
+                    let expected = body.lines()
+                        .find(|l| l.ends_with(&installer_name))
+                        .and_then(|l| l.split_whitespace().next())
+                        .map(|s| s.to_lowercase());
+
+                    if let Some(expected_hash) = expected {
+                        match sha256_of_file(&dest) {
+                            Ok(actual) if actual == expected_hash => {}
+                            Ok(actual) => {
+                                let _ = std::fs::remove_file(&dest);
+                                let _ = tx.send(DownloadMsg::Failed(format!(
+                                    "SHA256 mismatch — expected {expected_hash}, got {actual}"
+                                )));
+                                return;
+                            }
+                            Err(e) => {
+                                let _ = tx.send(DownloadMsg::Failed(
+                                    format!("SHA256 check failed: {e}")
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                    // If we couldn't find the file in SHA256SUMS.txt we proceed anyway
+                    // (older releases may not have had it).
+                }
+            }
+
+            let _ = tx.send(DownloadMsg::Done(dest));
+        })
+        .ok();
+}
+
+fn sha256_of_file(path: &std::path::Path)
+    -> Result<String, Box<dyn std::error::Error + Send + Sync>>
+{
+    use std::io::Read;
+    // Roll our own SHA-256 using the standard library isn't practical,
+    // but we can shell out to PowerShell which is always available on Windows.
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile", "-Command",
+            &format!(
+                "(Get-FileHash '{}' -Algorithm SHA256).Hash.ToLower()",
+                path.display()
+            ),
+        ])
+        .output()?;
+    let hash = String::from_utf8(out.stdout)?.trim().to_lowercase();
+    if hash.len() == 64 {
+        Ok(hash)
+    } else {
+        Err(format!("Unexpected hash output: {hash}").into())
+    }
 }
 
 fn check_for_update() -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
