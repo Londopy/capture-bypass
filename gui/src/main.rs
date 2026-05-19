@@ -211,7 +211,11 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             "Capture Bypass removes the WDA_EXCLUDEFROMCAPTURE screen-capture \
              protection from Windows application windows, letting OBS, the \
              Snipping Tool, and any other screen-capture software record them \
-             normally."),
+             normally.\n\
+             \n\
+             Typical use-cases: streaming or recording DRM video players, \
+             conference call windows, and any other app that explicitly hides \
+             itself from capture software."),
         ("How does it work?",
             "Windows provides SetWindowDisplayAffinity(), which lets a process \
              protect its own windows from capture.  Because the API only works \
@@ -257,7 +261,8 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
              PID      — Process ID\n\
              Process  — Executable name  (orange \"32\" badge = 32-bit process)\n\
              Title    — Window title\n\
-             Status   — Live protection state, refreshed every 500 ms:\n\
+             Status   — Live protection state, refreshed every 500 ms\n\
+                          (or ~100 ms with Fast Scan enabled):\n\
                           PROTECTED = WDA_EXCLUDEFROMCAPTURE\n\
                           MONITOR   = WDA_MONITOR\n\
                           OK        = WDA_NONE (capturable)\n\
@@ -270,27 +275,141 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                                     multiple protected windows.\n\
              \n\
              Mode                  Toggle between One-shot and Persistent injection.\n\
+                                    One-shot is fast; Persistent fights re-protection.\n\
              \n\
-             🔨 Stress Test        Launch stress_tester.exe — a self-protecting window.\n\
-                                    Includes Fight Mode, Scenario A (process scan),\n\
-                                    and Scenario B (module ejection).\n\
+             🔨 Stress Test        Launch stress_tester.exe — a self-protecting window\n\
+                                    with Fight Mode, Scenario A, and Scenario B.\n\
              \n\
-             ⚙ Settings            Opens the Settings window (startup, notifications,\n\
-                                    and global hotkey).\n\
+             ⚙ Settings            Opens the full Settings panel.\n\
              \n\
-             📋 Log                Toggle the injection history panel.\n\
+             📋 Log                Toggle the injection history side-panel.\n\
              \n\
-             📖 Help               Opens this window."),
+             📖 Help               Opens this window.\n\
+             \n\
+             🆕 vX.Y.Z available   Appears when a new release is detected on GitHub.\n\
+                                    Click it to open the update confirmation dialog.\n\
+                                    After you confirm, the installer downloads in the\n\
+                                    background (progress shown in the header).  When\n\
+                                    the download finishes the installer runs silently\n\
+                                    and the app restarts automatically — no second\n\
+                                    click required."),
         ("Filter bar",
             "Type to search live by window title, process name, or PID.  Click ✕ to clear.\n\
              \n\
              \"Protected only\" checkbox hides all unprotected windows.\n\
              \n\
+             Protected-window indicator (right side of filter bar):\n\
+               🔴 N protected — one or more windows currently have WDA protection.\n\
+               🟢 0 protected — no protected windows are visible right now.\n\
+             \n\
              🤖 Auto-inject — background thread strips newly-protected windows \
-             automatically.  Continues running while the app is minimised to tray."),
+             automatically.  Continues running while the app is minimised to tray.\n\
+             \n\
+             👁 Watch mode — shows ALL windows including unprotected ones in the list \
+             so you can monitor a specific process before protection is applied."),
         ("Status bar",
-            "Shows the last action result and how long ago it occurred.\n\
-             Green = success     Red = error     Gray = neutral / informational"),
+            "The bottom bar shows, left to right:\n\
+             \n\
+             v{version}       — current app version (e.g. v3.5.9)\n\
+             {N} lifetime     — total injections performed across all sessions\n\
+             {N} windows      — visible windows currently enumerated\n\
+             {N} protected    — windows with WDA_EXCLUDEFROMCAPTURE right now\n\
+             {N} 32-bit       — 32-bit processes in the current list\n\
+             \n\
+             Below that: the most recent action message with a timestamp.  \
+             Green = success, red = error, gray = informational."),
+    ]),
+    ("Settings", &[
+        ("Opening Settings",
+            "Click ⚙ Settings in the header to open the Settings window.  \
+             All changes are saved to config.toml immediately."),
+        ("Silent startup",
+            "When enabled the main window is hidden on launch — the app starts \
+             directly in the system tray.  Re-open it by clicking the tray icon \
+             or right-clicking and choosing Open.\n\
+             \n\
+             Useful for streamers who want capture-bypass running in the \
+             background without an extra window appearing at startup."),
+        ("Strip on launch",
+            "When enabled the app automatically calls Strip All Protected on \
+             startup, once the initial window scan completes.  Any protected \
+             windows present at launch are stripped without any user action.\n\
+             \n\
+             Combine with Silent Startup for fully hands-off protection removal \
+             every time Windows boots."),
+        ("Fast scan",
+            "Increases the background window-scan interval from ~500 ms to \
+             ~100 ms.  Protected windows are detected and (if auto-inject is on) \
+             stripped up to 5× faster.\n\
+             \n\
+             Trade-off: slightly higher CPU usage.  Recommended for apps that \
+             apply protection very briefly or mid-render."),
+        ("Desktop notifications",
+            "Toggle Windows balloon-tip notifications for injection events.  \
+             When multiple windows are stripped within 400 ms they are grouped \
+             into a single \"Stripped N windows\" notification instead of \
+             producing a burst of individual toasts.\n\
+             \n\
+             Note: notifications are sent via Win32 Shell_NotifyIcon so they \
+             work correctly even when the app is running as Administrator."),
+        ("Global hotkey",
+            "Assign a keyboard shortcut to trigger Strip All Protected from \
+             anywhere — even when the capture-bypass window is not focused or \
+             is minimised to the tray.\n\
+             \n\
+             Click inside the hotkey field and press your desired key combo \
+             (e.g. Ctrl+Shift+S), then save.  Leave it blank to disable."),
+        ("Discord Rich Presence",
+            "When enabled, the app reports its current activity to Discord so \
+             your status shows that you are using capture-bypass.  The presence \
+             updates with the number of protected windows detected and the \
+             injection count.\n\
+             \n\
+             Disable this if you stream your Discord status and don't want \
+             capture-bypass mentioned publicly."),
+        ("Export / Import config",
+            "Export config — writes the current settings (all toggles, rules, \
+             exclusions, hotkey, etc.) to a capture_bypass_config.toml file \
+             you choose.  Use this to back up your configuration or move it \
+             to another machine.\n\
+             \n\
+             Import config — loads settings from a previously exported file, \
+             replacing the current configuration.  The app applies the imported \
+             settings immediately without restarting."),
+        ("Injection log file",
+            "Enable logging to write every injection attempt (timestamp, PID, \
+             process name, result) to a persistent log file alongside the \
+             executable.  Useful for debugging or keeping an audit trail."),
+    ]),
+    ("Per-Process Rules & Exclusions", &[
+        ("Per-process rules",
+            "The Rules table in Settings lets you override the global injection \
+             mode for specific processes.\n\
+             \n\
+             Three modes are available per rule:\n\
+             \n\
+             Always One-shot   — always use the fast one-shot DLL for this\n\
+                                 process, regardless of the global Mode toggle.\n\
+             \n\
+             Always Persistent — always use the persistent (re-applying) DLL\n\
+                                 for this process.  Good for known fighters.\n\
+             \n\
+             Skip              — never inject into this process, even if auto-\n\
+                                 inject or Strip All Protected is triggered.\n\
+             \n\
+             Add a rule by typing the executable name (e.g. chrome.exe) into \
+             the rule input field, choosing a mode, and clicking Add.  \
+             Rules are matched case-insensitively against the process name."),
+        ("Exclusion list",
+            "Processes in the exclusion list are completely ignored by all \
+             injection operations — manual Strip, Strip All Protected, and \
+             auto-inject will all skip them.\n\
+             \n\
+             Add an entry by typing the executable name (e.g. SecurityAgent.exe) \
+             and clicking Add.  Remove entries with the ✕ button.\n\
+             \n\
+             Use this to prevent accidental injection into system processes, \
+             AV software, or any process you want left alone."),
     ]),
     ("Injection Modes", &[
         ("⚡ One-shot mode (default)",
@@ -298,7 +417,8 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
              Fast and lightweight.\n\
              \n\
              Use when: the target app sets protection only once at startup \
-             and never re-applies it."),
+             and never re-applies it.  Also suitable for most browsers and \
+             standard media players."),
         ("🔁 Persistent mode",
             "The payload DLL stays alive inside the target process and \
              re-applies WDA_NONE every 500 ms for the entire lifetime of \
@@ -306,7 +426,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
              \n\
              Use when: the target app calls SetWindowDisplayAffinity on a \
              timer to fight back against one-shot injection (e.g. DRM video \
-             players)."),
+             players, apps with anti-capture enforcement)."),
         ("Re-injection & re-protection",
             "Windows caches loaded DLLs by file path — if the same DLL path \
              is already loaded in a process, LoadLibraryA silently no-ops.\n\
@@ -314,7 +434,10 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
              If a one-shot strip appears to succeed but the status badge \
              returns to PROTECTED shortly after, the app is re-applying \
              protection on a timer.  Switch to 🔁 Persistent mode — a popup \
-             will also appear automatically when this is detected."),
+             will also appear automatically when re-protection is detected.\n\
+             \n\
+             Per-process rules let you pin specific executables to Persistent \
+             mode so you never have to switch manually for known fighters."),
     ]),
     ("Browser Injection", &[
         ("Why browsers need special handling",
@@ -328,11 +451,15 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
              \n\
              1. Injects the payload into the main (browser) PID\n\
              2. Enumerates all child processes via CreateToolhelp32Snapshot\n\
-             3. Injects into every child PID as well"),
+             3. Injects into every child PID as well\n\
+             \n\
+             Auto-inject also performs this recursive child-process scan when \
+             it detects a browser process has become protected."),
         ("Tip",
             "If a browser re-applies protection after navigating to a new \
              video, click ⚡ Strip All Protected again, or enable \
-             🤖 Auto-inject so it's handled automatically."),
+             🤖 Auto-inject so it's handled automatically.  For persistently \
+             fighting browsers, add a per-process rule pinned to Persistent mode."),
     ]),
     ("System Tray & Auto-inject", &[
         ("System tray",
@@ -341,46 +468,103 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
              \n\
              Tray icon right-click menu:\n\
                Open  — restore the main window\n\
-               Quit  — fully exit the application"),
+               Quit  — fully exit the application\n\
+             \n\
+             The tray icon changes colour based on the current state:\n\
+               Blue  — no protected windows detected\n\
+               Red   — one or more protected windows are currently detected\n\
+             \n\
+             The tooltip updates to show how many protected windows are present \
+             so you can monitor state without opening the app."),
         ("Auto-inject",
             "Enable the 🤖 Auto-inject toggle in the toolbar.\n\
              \n\
-             A background thread polls GetWindowDisplayAffinity every 500 ms. \
-             Any window that becomes protected and hasn't been seen before is \
-             automatically stripped.\n\
+             A background thread polls GetWindowDisplayAffinity every 500 ms \
+             (or ~100 ms with Fast Scan enabled).  Any window that becomes \
+             protected and hasn't already been handled is automatically stripped.\n\
+             \n\
+             Per-process rules and the exclusion list are respected — processes \
+             set to Skip or in the exclusion list are never auto-injected.\n\
              \n\
              Designed for streamers: enable auto-inject, minimise to tray, and \
              any app that tries to block capture is handled silently in the \
-             background."),
+             background.  Desktop notifications (if enabled) confirm each strip."),
+    ]),
+    ("Auto-Update", &[
+        ("How updates work",
+            "The app checks GitHub Releases for a newer version tag when it \
+             starts and periodically while running.\n\
+             \n\
+             When a new version is found:\n\
+             \n\
+             1. A \"🆕 vX.Y.Z available\" button appears in the header.\n\
+             2. Clicking it opens a confirmation dialog — no download starts \
+                until you explicitly confirm.\n\
+             3. After you click \"Update now\", the installer downloads in the \
+                background.  A progress indicator appears in the header.\n\
+             4. When the download finishes the installer runs silently (/SILENT)\n\
+                and the app restarts automatically.  You do not need to click\n\
+                anything else after confirming.\n\
+             \n\
+             The update replaces all app binaries (GUI, payload DLLs, stress \
+             tester) in one step.  Your config.toml is preserved."),
+        ("Update installs wrong / nothing happens",
+            "The installer is downloaded to a temp file next to the executable. \
+             If the download fails the status bar will show an error.  Check \
+             your internet connection and try again.\n\
+             \n\
+             The installer requires the same Administrator token the GUI is \
+             already running under, so UAC should not prompt again."),
     ]),
     ("Troubleshooting", &[
         ("DLLs not found",
             "The payload DLLs haven't been built yet.  Run:\n\
              \n\
-             cargo build --release -p payload_dll -p payload_dll_persistent"),
+             cargo build --release -p payload_dll -p payload_dll_persistent\n\
+             \n\
+             (For 32-bit support also build the i686 target — see Requirements & Build.)"),
         ("\"Strip failed\" / access denied",
             "OpenProcess requires elevated privileges for processes not owned \
              by your session.  Make sure capture_bypass_gui.exe is running as \
              Administrator (the UAC prompt appears on launch)."),
         ("Injection succeeds but window is still black in OBS",
-            "1. Wait for the next 500 ms refresh — if the status badge shows OK, \
+            "1. Wait for the next scan refresh — if the status badge shows OK, \
              OBS may need its capture source refreshed (remove and re-add it).\n\
              2. For browsers, click Strip Protection again — it re-injects \
              child processes too.\n\
              3. If the badge keeps flipping back to PROTECTED, the app is \
-             fighting back on a timer.  Switch to 🔁 Persistent mode."),
+             fighting back on a timer.  Switch to 🔁 Persistent mode, or add \
+             a per-process rule for that executable."),
+        ("Notifications don't appear",
+            "Windows balloon tips are suppressed by Focus Assist / Do Not \
+             Disturb.  Check Action Center settings and ensure \"Alarms only\" \
+             mode is not active.\n\
+             \n\
+             capture-bypass sends notifications via Win32 Shell_NotifyIcon \
+             (not WinRT toast), so they work correctly from an Administrator \
+             process — but OS-level suppression still applies."),
         ("Antivirus flags the DLL",
             "DLL injection is used by both legitimate tools and malware, so \
              heuristic scanners may flag the payload.  Inspect \
              payload_dll/src/lib.rs — it only calls SetWindowDisplayAffinity.\n\
              \n\
-             Add an exclusion for the target\\ directory in your AV settings."),
+             Add an exclusion for the target\\ directory in your AV settings.  \
+             You can also use the per-process exclusion list to make the GUI \
+             itself ignore specific processes the AV is watching."),
         ("x86 injection fails even with x86 binaries present",
             "A 64-bit process cannot inject into a 32-bit process and \
              vice-versa.  Verify you built the x86 target:\n\
              \n\
              rustup target add i686-pc-windows-msvc\n\
-             cargo build --release --target i686-pc-windows-msvc -p payload_dll"),
+             cargo build --release --target i686-pc-windows-msvc -p payload_dll\n\
+             \n\
+             32-bit processes are shown with an orange \"32\" badge.  If the \
+             badge is orange and injection fails, the x86 DLL is likely missing."),
+        ("Config file location",
+            "The config is stored as config.toml in the same directory as \
+             capture_bypass_gui.exe.  If settings don't save, check that the \
+             directory is writable.  You can also use Export config in Settings \
+             to save a copy to any location."),
     ]),
 ];
 
@@ -535,6 +719,9 @@ struct App {
     download_rx: Option<Receiver<DownloadMsg>>,
     // true while the "Update to vX.X.X?" confirmation dialog is shown
     show_update_confirm: bool,
+    // true once the user has clicked "Update now" — download completion triggers
+    // automatic restart without requiring a second button click
+    update_confirmed: bool,
 
     // Toast notifications (auto-inject strips show a desktop notification)
     toast_enabled: bool,
@@ -713,6 +900,7 @@ impl App {
             download_state: DownloadState::Idle,
             download_rx: None,
             show_update_confirm: false,
+            update_confirmed: false,
             toast_enabled: cfg.toast_enabled,
             toast_pending: Vec::new(),
             toast_batch_deadline: None,
@@ -1285,8 +1473,6 @@ impl eframe::App for App {
                     self.download_state = DownloadState::Verifying;
                 }
                 DownloadMsg::Done(path) => {
-                    // Don't close automatically — show a Restart button instead.
-                    // The user picks when to restart, not us.
                     self.download_state = DownloadState::Ready(path);
                     clear_download_rx = true;
                 }
@@ -1298,6 +1484,31 @@ impl eframe::App for App {
         }
         if clear_download_rx {
             self.download_rx = None;
+        }
+
+        // If the user already confirmed the update, fire the installer the moment
+        // the download finishes — no second button click required.
+        if self.update_confirmed {
+            if let DownloadState::Ready(_) = &self.download_state {
+                if let DownloadState::Ready(path) =
+                    std::mem::replace(&mut self.download_state, DownloadState::Idle)
+                {
+                    self.update_confirmed = false;
+                    let our_exe = std::env::current_exe()
+                        .unwrap_or_else(|_| self.exe_dir.join("capture_bypass_gui.exe"));
+                    let installer_str = path.display().to_string().replace('\'', "''");
+                    let gui_str = our_exe.display().to_string().replace('\'', "''");
+                    let script = format!(
+                        "Start-Process '{installer_str}' -ArgumentList '/SILENT' -Wait; \
+                         Start-Process '{gui_str}'"
+                    );
+                    let _ = std::process::Command::new("powershell")
+                        .args(["-NoProfile", "-WindowStyle", "Hidden",
+                               "-Command", &script])
+                        .spawn();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
         }
 
         // Poll global hotkey messages
@@ -1528,6 +1739,7 @@ impl eframe::App for App {
                     });
                 if confirmed {
                     self.show_update_confirm = false;
+                    self.update_confirmed = true;
                     start_download(tag, &mut self.download_state,
                                    &mut self.download_rx, &self.exe_dir);
                 }

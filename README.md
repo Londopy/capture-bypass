@@ -130,22 +130,39 @@ cargo build --release --target aarch64-pc-windows-msvc -p payload_dll -p payload
 target\release\capture_bypass_gui.exe
 ```
 
-1. The app lists all visible, titled windows with their PID, process icon, name, and live protection status (refreshed every 500 ms). Click any column header to sort.
-2. Use the **Filter** bar to search by process name, window title, or PID.
+1. The app lists all visible, titled windows with their PID, process icon, name, and live protection status (refreshed every 500 ms). Click any column header to sort. The **status bar** along the bottom shows the current app version, lifetime injection count, and a live tally of visible / protected / 32-bit windows.
+2. Use the **Filter** bar to search by process name, window title, or PID. The **🔴 / 🟢 protected indicator** on the right side of the filter bar shows at a glance whether any protected windows are currently detected.
 3. Tick **Protected only** to hide unprotected windows.
 4. Click **Strip Protection** on any row, or **⚡ Strip All Protected** to clear everything at once.
 5. Toggle **Mode** between *One-shot* (strips once, fast) and *Persistent* (re-strips every 500 ms — for apps that keep re-applying protection). If an app re-applies after a one-shot, a popup offers to escalate to persistent automatically.
-6. Enable **🤖 Auto-inject** to run in the background — it scans every 500 ms, strips newly protected windows automatically, escalates to persistent mode if a process fights back, and skips anything the OS has locked down with mitigation policies. You can just leave it on and forget about it.
+6. Enable **🤖 Auto-inject** to run in the background — it scans for newly protected windows and strips them automatically, escalates to persistent mode if a process fights back, and skips anything in the exclusion list or with a *Skip* per-process rule. Works while minimised to tray.
 7. Enable **🚀 Start with Windows** to add a startup registry entry so the app launches at login.
-8. Click **📖 Help** to open the built-in docs.
-9. Use the **Watch** bar to pin specific process names — they get stripped automatically whenever they appear, independent of auto-inject.
-10. Click **⌨ Hotkey** to register **Ctrl+Shift+B** as a global "Strip All Protected" shortcut, works even when minimised to tray.
-11. Click **🔔 Toasts** to get Windows desktop notifications whenever auto-inject strips something.
-12. Click **📋 Log** to open the scrollable injection log panel.
-13. Open **⚙ Settings** to configure tray behavior, hotkey, toasts, and an optional **injection log file** (`%APPDATA%\capture-bypass\injection.log`) that records every strip with a timestamp and which mode was used.
-14. When a newer release is detected, a **🆕 v{x.y.z} available** button appears in the header.
+8. Click **📖 Help** to open the built-in docs (covers every feature in detail).
+9. Use **Watch mode** in the filter bar to monitor a specific process even before it becomes protected.
+10. The **tray icon** turns **red** when protected windows are detected and **blue** when none are present — a quick check without opening the app. Right-click → Open or Quit.
 
-All settings are saved automatically to `%APPDATA%\capture-bypass\config.toml`.
+### Settings
+
+Open **⚙ Settings** in the header to access all configuration options:
+
+| Setting | What it does |
+|---|---|
+| **Silent startup** | Hides the main window on launch — the app starts directly in the system tray |
+| **Strip on launch** | Automatically strips all protected windows once the first scan completes at startup |
+| **Fast scan** | Increases scan frequency from ~500 ms to ~100 ms for faster detection (slight CPU trade-off) |
+| **Desktop notifications** | Windows balloon-tip notifications on injection events; multiple strips within 400 ms are grouped into one "Stripped N windows" toast |
+| **Global hotkey** | A keyboard shortcut (default Ctrl+Shift+B) that triggers Strip All Protected from anywhere, even when minimised |
+| **Discord Rich Presence** | Shows your capture-bypass activity in your Discord status |
+| **Export / Import config** | Save your full settings to a `.toml` file or restore from a previous export — useful for backups or moving to a new machine |
+| **Injection log file** | Appends every strip attempt (timestamp, PID, process, result, mode) to a persistent log file |
+| **Per-process rules** | Override the global Mode for specific executables: *Always One-shot*, *Always Persistent*, or *Skip* (never inject) |
+| **Exclusion list** | Executables in this list are completely ignored by all injection operations — manual, auto-inject, and Strip All Protected |
+
+All settings are saved automatically to `config.toml` alongside the executable.
+
+### Auto-update
+
+When a newer release is available, a **🆕 vX.Y.Z available** button appears in the header. Clicking it opens a confirmation dialog — no download starts until you confirm. After you click **Update now**, the installer downloads in the background (progress shown in the header). When finished, the installer runs silently and the app restarts automatically. No second click needed.
 
 ### Browsers
 
