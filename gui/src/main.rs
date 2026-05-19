@@ -490,6 +490,8 @@ struct App {
     // Download-and-install flow
     download_state: DownloadState,
     download_rx: Option<Receiver<DownloadMsg>>,
+    // true while the "Update to vX.X.X?" confirmation dialog is shown
+    show_update_confirm: bool,
 
     // Toast notifications (auto-inject strips show a desktop notification)
     toast_enabled: bool,
@@ -629,6 +631,7 @@ impl App {
             update_rx: Some(update_rx),
             download_state: DownloadState::Idle,
             download_rx: None,
+            show_update_confirm: false,
             toast_enabled: cfg.toast_enabled,
             icon_cache: HashMap::new(),
             _tray_icon: tray_icon,
@@ -1107,21 +1110,9 @@ impl eframe::App for App {
             self.push_rpc_state();
         }
 
-        // Poll auto-update result — start download immediately on detection
+        // Poll auto-update result — just record the state; download only starts after user confirms.
         if let Some(rx) = &self.update_rx {
             while let Ok(state) = rx.try_recv() {
-                if let UpdateState::Available(ref tag) = state {
-                    // Kick off the background download right away — no button click needed.
-                    // By the time the user sees the notification it'll already be partway done.
-                    if self.download_rx.is_none() {
-                        start_download(
-                            tag.clone(),
-                            &mut self.download_state,
-                            &mut self.download_rx,
-                            &self.exe_dir,
-                        );
-                    }
-                }
                 self.update_state = Some(state);
             }
         }
@@ -1288,6 +1279,56 @@ impl eframe::App for App {
             &mut start_hotkey_recording,
         );
 
+        // Update confirmation dialog
+        // Rendered as a floating Window before the header panel so it
+        // appears on top.  show_update_confirm is toggled by the header button.
+        if self.show_update_confirm {
+            if let Some(UpdateState::Available(tag)) = &self.update_state {
+                let tag = tag.clone();
+                let mut confirmed = false;
+                let mut cancelled = false;
+                egui::Window::new("Update available")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(format!("Update to {}?", tag));
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(
+                                "The installer will run silently in the background.\n\
+                                 When it finishes the app will relaunch automatically."
+                            )
+                            .weak()
+                            .small(),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(
+                                egui::Button::new("⬇ Update now")
+                                    .fill(Color32::from_rgb(20, 80, 30))
+                            ).clicked() {
+                                confirmed = true;
+                            }
+                            ui.add_space(8.0);
+                            if ui.button("Later").clicked() {
+                                cancelled = true;
+                            }
+                        });
+                    });
+                if confirmed {
+                    self.show_update_confirm = false;
+                    start_download(tag, &mut self.download_state,
+                                   &mut self.download_rx, &self.exe_dir);
+                }
+                if cancelled {
+                    self.show_update_confirm = false;
+                }
+            } else {
+                self.show_update_confirm = false;
+            }
+        }
+
         // Top bar
         // Collect actions here to avoid borrow conflicts
         let mut do_strip_all = false;
@@ -1298,6 +1339,7 @@ impl eframe::App for App {
         let mut manual_refresh = false;
         let mut do_stress_test = false;
         let mut toggle_log = false;
+        let mut toggle_update_confirm = false;
         let mut new_sort: Option<(SortCol, bool)> = None;
         let mut remove_watch: Option<usize> = None;
         let mut add_watch = false;
@@ -1316,15 +1358,19 @@ impl eframe::App for App {
                     }
                     ui.add_space(4.0);
 
-                    // Update header — download starts automatically, user only clicks once at the end.
+                    // Update header — click to open confirm dialog, then download, then restart.
                     if let Some(UpdateState::Available(tag)) = &self.update_state {
                         let tag = tag.clone();
                         let do_restart = match &self.download_state {
-                            // Downloading silently in the background
+                            // Not yet downloading — show clickable "available" button
                             DownloadState::Idle => {
-                                ui.add(egui::Button::new(format!("🆕 v{tag}"))
-                                    .fill(Color32::from_rgb(60, 40, 10)))
-                                    .on_hover_text("Preparing download…");
+                                if ui.add(egui::Button::new(format!("🆕 v{tag} available"))
+                                    .fill(Color32::from_rgb(80, 50, 10)))
+                                    .on_hover_text("Click to update")
+                                    .clicked()
+                                {
+                                    toggle_update_confirm = true;
+                                }
                                 false
                             }
                             DownloadState::Downloading(pct) => {
@@ -1373,8 +1419,22 @@ impl eframe::App for App {
                             if let DownloadState::Ready(path) =
                                 std::mem::replace(&mut self.download_state, DownloadState::Idle)
                             {
-                                let _ = std::process::Command::new(&path)
-                                    .args(["/SILENT", "/RESTARTAPPLICATIONS"])
+                                // Spawn a hidden PowerShell process that:
+                                //   1. Runs the installer silently and waits for it to finish
+                                //   2. Relaunches capture_bypass_gui.exe
+                                // This works around /RESTARTAPPLICATIONS not relaunching the app,
+                                // since the app is already closed before the installer completes.
+                                let our_exe = std::env::current_exe()
+                                    .unwrap_or_else(|_| self.exe_dir.join("capture_bypass_gui.exe"));
+                                let installer_str = path.display().to_string().replace('\'', "''");
+                                let gui_str = our_exe.display().to_string().replace('\'', "''");
+                                let script = format!(
+                                    "Start-Process '{installer_str}' -ArgumentList '/SILENT' -Wait; \
+                                     Start-Process '{gui_str}'"
+                                );
+                                let _ = std::process::Command::new("powershell")
+                                    .args(["-NoProfile", "-WindowStyle", "Hidden",
+                                           "-Command", &script])
                                     .spawn();
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
@@ -1555,6 +1615,9 @@ impl eframe::App for App {
         }
         if toggle_settings {
             self.show_settings = !self.show_settings;
+        }
+        if toggle_update_confirm {
+            self.show_update_confirm = !self.show_update_confirm;
         }
         // Actions forwarded from the settings window
         if toggle_startup_from_settings {
@@ -1741,7 +1804,8 @@ impl eframe::App for App {
                     let n_32 = all_windows.iter().filter(|w| w.is_32bit).count();
                     ui.label(
                         RichText::new(format!(
-                            "{} windows  •  {} protected  •  {} 32-bit",
+                            "v{}  •  {} windows  •  {} protected  •  {} 32-bit",
+                            env!("CARGO_PKG_VERSION"),
                             all_windows.len(),
                             n_prot,
                             n_32
