@@ -959,10 +959,8 @@ impl App {
         std::thread::Builder::new()
             .name("discord-rpc".into())
             .spawn(move || {
-                let mut client = match DiscordIpcClient::new(DISCORD_APP_ID) {
-                    Ok(c) => c,
-                    Err(_) => return,
-                };
+                // new() is infallible in discord-rich-presence 1.1 — connect() can fail
+                let mut client = DiscordIpcClient::new(DISCORD_APP_ID);
                 if client.connect().is_err() {
                     return;
                 }
