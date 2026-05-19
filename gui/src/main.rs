@@ -92,10 +92,19 @@ struct Config {
     logging_enabled: bool,
     #[serde(default)]
     discord_rpc_enabled: bool,
+    // Hotkey virtual-key code (Windows VK_* value). Default = 'B' (0x42).
+    #[serde(default = "default_hotkey_key")]
+    hotkey_key: u32,
+    // Hotkey modifier mask (MOD_CONTROL=0x2, MOD_SHIFT=0x4, MOD_ALT=0x1).
+    // Default = Ctrl+Shift (0x6).
+    #[serde(default = "default_hotkey_mods")]
+    hotkey_mods: u32,
 }
 
 fn default_sort_col() -> u8 { 0 }
 fn default_minimize_to_tray() -> bool { true }
+fn default_hotkey_key()  -> u32 { b'B' as u32 }
+fn default_hotkey_mods() -> u32 { 0x02 | 0x04 } // MOD_CONTROL | MOD_SHIFT
 
 impl Default for Config {
     fn default() -> Self {
@@ -112,6 +121,8 @@ impl Default for Config {
             minimize_to_tray: true,
             logging_enabled: false,
             discord_rpc_enabled: false,
+            hotkey_key: default_hotkey_key(),
+            hotkey_mods: default_hotkey_mods(),
         }
     }
 }
@@ -466,9 +477,12 @@ struct App {
     watch_input: String,
     watch_seen: HashSet<u32>, // PIDs already handled by watch mode this session
 
-    // Global hotkey (Ctrl+Shift+B → Strip All Protected)
+    // Global hotkey
     hotkey_enabled: bool,
     hotkey_id: i32,
+    hotkey_key: u32,    // Windows VK_* code for the trigger key
+    hotkey_mods: u32,   // MOD_CONTROL | MOD_SHIFT | MOD_ALT bitmask
+    hotkey_recording: bool, // true while waiting for user to press a new combo
 
     // Auto-update
     update_state: Option<UpdateState>,
@@ -546,7 +560,7 @@ impl App {
         // Register global hotkey if saved as enabled
         let hotkey_id = 1_i32;
         if cfg.hotkey_enabled {
-            register_hotkey(hotkey_id);
+            register_hotkey(hotkey_id, cfg.hotkey_mods, cfg.hotkey_key);
         }
 
         // Set up system tray
@@ -608,6 +622,9 @@ impl App {
             watch_seen: HashSet::new(),
             hotkey_enabled: cfg.hotkey_enabled,
             hotkey_id,
+            hotkey_key: cfg.hotkey_key,
+            hotkey_mods: cfg.hotkey_mods,
+            hotkey_recording: false,
             update_state: None,
             update_rx: Some(update_rx),
             download_state: DownloadState::Idle,
@@ -831,6 +848,8 @@ impl App {
             minimize_to_tray: self.minimize_to_tray,
             logging_enabled: self.logging_enabled,
             discord_rpc_enabled: self.discord_rpc_enabled,
+            hotkey_key: self.hotkey_key,
+            hotkey_mods: self.hotkey_mods,
         });
     }
 
@@ -1246,6 +1265,7 @@ impl eframe::App for App {
         let mut toggle_logging_from_settings          = false;
         let mut open_log_file_from_settings           = false;
         let mut toggle_discord_rpc_from_settings      = false;
+        let mut start_hotkey_recording                = false;
         render_settings_window(
             ctx,
             &mut self.show_settings,
@@ -1255,6 +1275,9 @@ impl eframe::App for App {
             self.minimize_to_tray,
             self.logging_enabled,
             self.discord_rpc_enabled,
+            self.hotkey_mods,
+            self.hotkey_key,
+            self.hotkey_recording,
             &mut toggle_startup_from_settings,
             &mut toggle_toast_from_settings,
             &mut toggle_hotkey_from_settings,
@@ -1262,6 +1285,7 @@ impl eframe::App for App {
             &mut toggle_logging_from_settings,
             &mut open_log_file_from_settings,
             &mut toggle_discord_rpc_from_settings,
+            &mut start_hotkey_recording,
         );
 
         // Top bar
@@ -1552,8 +1576,9 @@ impl eframe::App for App {
         if toggle_hotkey_from_settings {
             self.hotkey_enabled = !self.hotkey_enabled;
             if self.hotkey_enabled {
-                register_hotkey(self.hotkey_id);
-                self.set_status_neutral("⌨ Hotkey registered: Ctrl+Shift+B");
+                register_hotkey(self.hotkey_id, self.hotkey_mods, self.hotkey_key);
+                let combo = hotkey_display(self.hotkey_mods, self.hotkey_key);
+                self.set_status_neutral(format!("⌨ Hotkey registered: {combo}"));
             } else {
                 unregister_hotkey(self.hotkey_id);
                 self.set_status_neutral("⌨ Hotkey unregistered.");
@@ -1603,6 +1628,50 @@ impl eframe::App for App {
             }
             self.persist();
         }
+        if start_hotkey_recording {
+            self.hotkey_recording = true;
+            // Unregister the hotkey while recording so the key presses reach egui
+            if self.hotkey_enabled {
+                unregister_hotkey(self.hotkey_id);
+            }
+        }
+
+        // Capture new hotkey combo when in recording mode
+        if self.hotkey_recording {
+            let mut captured: Option<(u32, u32)> = None; // (mods, vk)
+            let escape = ctx.input(|i| {
+                for event in &i.events {
+                    if let egui::Event::Key { key, pressed: true, modifiers, .. } = event {
+                        if let Some(vk) = egui_key_to_vk(*key) {
+                            let mods = egui_mods_to_win(*modifiers);
+                            // Require at least one modifier so we don't steal bare letter keys
+                            if mods != 0 {
+                                captured = Some((mods, vk));
+                            }
+                        }
+                    }
+                }
+                i.key_pressed(egui::Key::Escape)
+            });
+            if let Some((mods, vk)) = captured {
+                self.hotkey_recording = false;
+                self.hotkey_mods = mods;
+                self.hotkey_key = vk;
+                if self.hotkey_enabled {
+                    register_hotkey(self.hotkey_id, mods, vk);
+                }
+                let combo = hotkey_display(mods, vk);
+                self.set_status_neutral(format!("⌨ Hotkey set to: {combo}"));
+                self.persist();
+            } else if escape {
+                self.hotkey_recording = false;
+                // Re-register the old hotkey since we cancelled
+                if self.hotkey_enabled {
+                    register_hotkey(self.hotkey_id, self.hotkey_mods, self.hotkey_key);
+                }
+            }
+        }
+
         if add_watch {
             let name = self.watch_input.trim().to_string();
             if !name.is_empty() && !self.watch_names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
@@ -2040,6 +2109,9 @@ fn render_settings_window(
     minimize_to_tray: bool,
     logging_enabled: bool,
     discord_rpc_enabled: bool,
+    hotkey_mods: u32,
+    hotkey_key: u32,
+    hotkey_recording: bool,
     toggle_startup: &mut bool,
     toggle_toast: &mut bool,
     toggle_hotkey: &mut bool,
@@ -2047,6 +2119,7 @@ fn render_settings_window(
     toggle_logging: &mut bool,
     open_log_file: &mut bool,
     toggle_discord_rpc: &mut bool,
+    start_hotkey_recording: &mut bool,
 ) {
     if !*show {
         return;
@@ -2123,11 +2196,13 @@ fn render_settings_window(
             ui.label(RichText::new("Hotkey").strong().color(Color32::from_rgb(180, 180, 220)));
             ui.separator();
             ui.add_space(4.0);
+
+            let combo = hotkey_display(hotkey_mods, hotkey_key);
             ui.horizontal(|ui| {
                 let hk_label = if hotkey_enabled {
-                    "⌨  Ctrl+Shift+B  (ON)"
+                    format!("⌨  {}  (ON)", combo)
                 } else {
-                    "⌨  Ctrl+Shift+B  (OFF)"
+                    format!("⌨  {}  (OFF)", combo)
                 };
                 let btn = egui::Button::new(hk_label)
                     .fill(if hotkey_enabled {
@@ -2135,26 +2210,45 @@ fn render_settings_window(
                     } else {
                         Color32::from_rgb(50, 50, 50)
                     })
-                    .min_size([300.0, 28.0].into());
+                    .min_size([220.0, 28.0].into());
                 if ui.add(btn)
-                    .on_hover_text(
-                        "Register Ctrl+Shift+B as a global hotkey.\n\
-                         Pressing it strips all protected windows, even\n\
-                         when the app is minimised to the system tray.",
-                    )
+                    .on_hover_text("Toggle the global hotkey on or off")
                     .clicked()
                 {
                     *toggle_hotkey = true;
                 }
+
+                // Change-hotkey button / recording indicator
+                if hotkey_recording {
+                    ui.add(egui::Button::new("⏺ Listening…")
+                        .fill(Color32::from_rgb(90, 20, 20))
+                        .min_size([0.0, 28.0].into()))
+                        .on_hover_text("Press a key combo (Ctrl/Shift/Alt + key). Esc to cancel.");
+                } else {
+                    if ui.add(egui::Button::new("Change…")
+                            .fill(Color32::from_rgb(50, 50, 70))
+                            .min_size([0.0, 28.0].into()))
+                        .on_hover_text("Click then press a new key combination")
+                        .clicked()
+                    {
+                        *start_hotkey_recording = true;
+                    }
+                }
             });
-            ui.add_space(6.0);
-            if hotkey_enabled {
-                ui.label(
-                    RichText::new("  Global shortcut active: Ctrl+Shift+B → Strip All Protected")
-                        .size(11.0)
-                        .color(Color32::from_rgb(130, 130, 200)),
-                );
-            }
+            ui.add_space(4.0);
+
+            // Description
+            let desc = if hotkey_recording {
+                RichText::new("  Press any key with Ctrl, Shift, or Alt held. Esc to cancel.")
+                    .size(10.5).color(Color32::from_rgb(200, 120, 120))
+            } else {
+                RichText::new(format!(
+                    "  {} → Strip All Protected windows, even when minimised to tray.",
+                    combo
+                ))
+                .size(10.5).color(Color32::from_rgb(110, 110, 150))
+            };
+            ui.label(desc);
             ui.add_space(12.0);
 
             // Window
@@ -2514,14 +2608,65 @@ fn write_startup_reg(enable: bool) -> bool {
 
 // Global hotkey helpers
 
-fn register_hotkey(id: i32) {
+// Convert an egui Key to a Windows virtual-key code.
+// Only letter and digit keys are supported for hotkey binding.
+fn egui_key_to_vk(key: egui::Key) -> Option<u32> {
+    use egui::Key::*;
+    match key {
+        A => Some(b'A' as u32), B => Some(b'B' as u32), C => Some(b'C' as u32),
+        D => Some(b'D' as u32), E => Some(b'E' as u32), F => Some(b'F' as u32),
+        G => Some(b'G' as u32), H => Some(b'H' as u32), I => Some(b'I' as u32),
+        J => Some(b'J' as u32), K => Some(b'K' as u32), L => Some(b'L' as u32),
+        M => Some(b'M' as u32), N => Some(b'N' as u32), O => Some(b'O' as u32),
+        P => Some(b'P' as u32), Q => Some(b'Q' as u32), R => Some(b'R' as u32),
+        S => Some(b'S' as u32), T => Some(b'T' as u32), U => Some(b'U' as u32),
+        V => Some(b'V' as u32), W => Some(b'W' as u32), X => Some(b'X' as u32),
+        Y => Some(b'Y' as u32), Z => Some(b'Z' as u32),
+        Num0 => Some(b'0' as u32), Num1 => Some(b'1' as u32),
+        Num2 => Some(b'2' as u32), Num3 => Some(b'3' as u32),
+        Num4 => Some(b'4' as u32), Num5 => Some(b'5' as u32),
+        Num6 => Some(b'6' as u32), Num7 => Some(b'7' as u32),
+        Num8 => Some(b'8' as u32), Num9 => Some(b'9' as u32),
+        F1  => Some(0x70), F2  => Some(0x71), F3  => Some(0x72), F4  => Some(0x73),
+        F5  => Some(0x74), F6  => Some(0x75), F7  => Some(0x76), F8  => Some(0x77),
+        F9  => Some(0x78), F10 => Some(0x79), F11 => Some(0x7A), F12 => Some(0x7B),
+        _ => None,
+    }
+}
+
+// Convert egui modifier flags to Windows MOD_* bitmask.
+fn egui_mods_to_win(mods: egui::Modifiers) -> u32 {
+    let mut flags = 0u32;
+    if mods.ctrl  { flags |= 0x02; } // MOD_CONTROL
+    if mods.shift { flags |= 0x04; } // MOD_SHIFT
+    if mods.alt   { flags |= 0x01; } // MOD_ALT
+    flags
+}
+
+// Format a (mods, vk) pair as a human-readable string like "Ctrl+Shift+B".
+fn hotkey_display(mods: u32, vk: u32) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if mods & 0x02 != 0 { parts.push("Ctrl"); }
+    if mods & 0x04 != 0 { parts.push("Shift"); }
+    if mods & 0x01 != 0 { parts.push("Alt"); }
+    let key_name: String = match vk {
+        0x70..=0x7B => format!("F{}", vk - 0x6F), // F1–F12
+        k if k >= b'A' as u32 && k <= b'Z' as u32 => {
+            char::from(k as u8).to_string()
+        }
+        k if k >= b'0' as u32 && k <= b'9' as u32 => {
+            char::from(k as u8).to_string()
+        }
+        _ => format!("0x{vk:02X}"),
+    };
+    parts.push(&key_name);
+    // Can't join borrowed Strings directly, so do it manually
+    parts.join("+")
+}
+
+fn register_hotkey(id: i32, mods: u32, key: u32) {
     unsafe {
-        let _ = RegisterHotKey(
-            None,
-            id,
-            HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_SHIFT.0),
-            u32::from('B'),
-        );
+        let _ = RegisterHotKey(None, id, HOT_KEY_MODIFIERS(mods), key);
     }
 }
 
@@ -2535,17 +2680,26 @@ fn unregister_hotkey(id: i32) {
 // Uses a simple PowerShell one-liner so we don't need the WinRT COM machinery.
 
 fn send_toast(title: &str, body: &str) {
+    // Windows toast notifications require a registered AUMID.
+    // Using PowerShell's own AUMID is the most reliable approach — it's always
+    // registered on every Windows 10/11 machine regardless of how the app was
+    // installed. The notification shows with a PowerShell icon but the title
+    // and body are fully customisable.
+    let aumid = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe";
     let script = format!(
         "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, \
          ContentType = WindowsRuntime] | Out-Null; \
          $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(\
            [Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
-         $template.GetElementsByTagName('text')[0].AppendChild($template.CreateTextNode('{title}')) | Out-Null; \
-         $template.GetElementsByTagName('text')[1].AppendChild($template.CreateTextNode('{body}')) | Out-Null; \
-         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('capture-bypass')\
+         $template.GetElementsByTagName('text')[0].AppendChild(\
+           $template.CreateTextNode('{title}')) | Out-Null; \
+         $template.GetElementsByTagName('text')[1].AppendChild(\
+           $template.CreateTextNode('{body}')) | Out-Null; \
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{aumid}')\
            .Show([Windows.UI.Notifications.ToastNotification]::new($template))",
         title = title.replace('\'', ""),
         body  = body.replace('\'', ""),
+        aumid = aumid,
     );
     let _ = std::process::Command::new("powershell")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
