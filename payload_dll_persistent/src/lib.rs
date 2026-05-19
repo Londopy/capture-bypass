@@ -228,7 +228,7 @@ unsafe fn hook_module_iat(base: *mut u8, _target_fn: *mut c_void) -> bool {
                             PAGE_EXECUTE_READWRITE,
                             &mut old_prot,
                         ).is_ok() {
-                            *iat = hooked_swda as usize;
+                            *iat = hooked_swda as *const () as usize;
                             let mut _tmp = PAGE_PROTECTION_FLAGS(0);
                             let _ = VirtualProtect(
                                 iat as *const c_void,

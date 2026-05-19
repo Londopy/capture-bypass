@@ -40,9 +40,7 @@ use windows::Win32::{
         Input::KeyboardAndMouse::{
             HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, UnregisterHotKey,
         },
-        Accessibility::{
-            SetWinEventHook, HWINEVENTHOOK, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
-        },
+        Accessibility::{SetWinEventHook, HWINEVENTHOOK},
         WindowsAndMessaging::{
             DispatchMessageW, EnumWindows, GetIconInfo, GetMessageW,
             GetWindowDisplayAffinity, GetWindowTextW, GetWindowThreadProcessId,
@@ -57,6 +55,10 @@ use windows::Win32::{
 const WDA_NONE: u32 = 0x00000000;
 const WDA_MONITOR: u32 = 0x00000001;
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x00000011;
+
+// SetWinEventHook flags — not exported as named constants in windows-rs 0.58
+const WINEVENT_OUTOFCONTEXT:   u32 = 0x0000;
+const WINEVENT_SKIPOWNPROCESS: u32 = 0x0002;
 
 const BROWSER_NAMES: &[&str] = &[
     "chrome.exe",
@@ -102,7 +104,7 @@ unsafe extern "system" fn winevent_proc(
     // id_object == 0 is OBJID_WINDOW — the window itself, not a child control.
     // hwnd must be non-null.  Filtering here avoids waking scan threads for
     // tooltip, menu, and other noise events.
-    if hwnd.0 == 0 || id_object != 0 { return; }
+    if hwnd.0.is_null() || id_object != 0 { return; }
 
     if let Some((lock, cvar)) = SCAN_WAKER.get() {
         // We only need to signal — the content of the mutex is unused.
