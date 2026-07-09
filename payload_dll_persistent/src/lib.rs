@@ -272,20 +272,22 @@ unsafe fn ascii_icase_eq(actual: *const u8, expected: &[u8]) -> bool {
 
 // ── Polling fallback thread ────────────────────────────────────────────────
 
-/// Background thread — strips protection on all owned windows every 5 seconds.
+/// Background thread — strips protection on all owned windows every 500 ms.
 ///
 /// Acts as a safety net for:
 ///   • windows that were already protected when the DLL was injected
 ///   • callers that resolve SetWindowDisplayAffinity via GetProcAddress at
 ///     runtime (dynamic loading bypasses the IAT patch entirely)
 ///
-/// Five seconds is long enough that the thread is effectively invisible from
-/// a CPU perspective; the IAT hook covers the hot path with zero latency.
+/// 500 ms is fast enough to catch dynamic callers with no perceptible CPU
+/// overhead; the IAT hook handles the zero-latency path for static callers.
+///
+/// No initial sleep: install_iat_hook() already calls GetModuleHandle,
+/// GetProcAddress, and VirtualProtect directly from DllMain — all safe
+/// because those APIs don't acquire the loader lock.  The initial SWDA
+/// call here is equally safe for the same reason.
 unsafe extern "system" fn worker_thread(_: *mut c_void) -> u32 {
-    // Small delay to let the loader finish before we start calling user32.
-    Sleep(100);
-
-    // Immediately strip any windows that were already protected at inject time.
+    // Strip any windows that were already protected at inject time.
     let pid = GetCurrentProcessId();
     let _ = EnumWindows(Some(strip_callback), LPARAM(pid as isize));
 

@@ -4,6 +4,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod theme;
+
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
@@ -861,6 +863,9 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Apply the custom visual theme (fonts, colors, spacing, rounding).
+        theme::install(&cc.egui_ctx);
+
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(PathBuf::from))
@@ -1133,7 +1138,7 @@ impl App {
                 });
                 return;
             }
-            match injector_core::inject_dll_stealth(pid, &dll_path) {
+            match injector_core::inject_fast(pid, &dll_path) {
                 Ok(()) => {
                     let _ = tx.send(InjResult {
                         msg: format!(
@@ -1145,8 +1150,7 @@ impl App {
                 Err(e) => {
                     let _ = tx.send(InjResult {
                         msg: format!(
-                            "✗  PID {pid} ({process_name}): {}",
-                            e.message()
+                            "✗  PID {pid} ({process_name}): {e}"
                         ),
                         ok: false,
                     });
@@ -1198,9 +1202,9 @@ impl App {
     fn set_status(&mut self, msg: impl Into<String>, ok: bool) {
         self.status_msg = msg.into();
         self.status_color = if ok {
-            Color32::from_rgb(100, 220, 100)
+            theme::SUCCESS
         } else {
-            Color32::from_rgb(220, 90, 90)
+            theme::DANGER
         };
         self.status_time = Some(Instant::now());
     }
@@ -1419,7 +1423,7 @@ impl App {
                         let dll_path = resolve_dll(is32);
                         if !dll_path.exists() { continue; }
 
-                        match injector_core::inject_checked(pid, &dll_path) {
+                        match injector_core::inject_fast(pid, &dll_path) {
                             Ok(()) => {
                                 let verb = if is_escalation {
                                     "🔄 Escalated→persistent"
@@ -1937,7 +1941,9 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.heading("🔓  capture-bypass");
+                ui.heading(RichText::new("capture-bypass").color(theme::TEXT).strong());
+                ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).monospace().size(11.0).color(theme::TEXT_FAINT));
+                ui.label(RichText::new("ADMIN").monospace().size(10.0).color(theme::ACCENT));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("📖 Help").clicked() {
@@ -2044,8 +2050,7 @@ impl eframe::App for App {
                     }
 
                     // Settings
-                    if ui.add(egui::Button::new("⚙ Settings")
-                        .fill(Color32::from_rgb(50, 50, 50)))
+                    if theme::ghost(ui, "Settings")
                         .on_hover_text("Startup, notifications, hotkey")
                         .clicked()
                     {
@@ -2054,9 +2059,8 @@ impl eframe::App for App {
                     ui.add_space(4.0);
 
                     // Log toggle
-                    let log_label = if self.show_log { "📋 Log ON" } else { "📋 Log" };
-                    if ui.add(egui::Button::new(log_label)
-                        .fill(if self.show_log { Color32::from_rgb(30, 60, 40) } else { Color32::from_rgb(50, 50, 50) }))
+                    let log_on = self.show_log;
+                    if theme::toggle_button(ui, log_on, if log_on { "Log ON" } else { "Log" })
                         .on_hover_text("Toggle the injection log panel")
                         .clicked()
                     {
@@ -2065,7 +2069,7 @@ impl eframe::App for App {
                     ui.add_space(4.0);
 
                     if ui
-                        .button("🔨 Stress Test")
+                        .button("Stress Test")
                         .on_hover_text(
                             "Launch stress_tester.exe — a self-protecting window.\n\
                              Also tests Scenario A (process scan) and Scenario B\n\
@@ -2077,26 +2081,14 @@ impl eframe::App for App {
                     }
                     ui.add_space(4.0);
 
-                    let mode_label = if self.persistent_mode {
-                        "🔁 Persistent"
-                    } else {
-                        "⚡ One-shot"
-                    };
-                    let mode_btn = egui::Button::new(mode_label)
-                        .fill(if self.persistent_mode {
-                            Color32::from_rgb(30, 100, 50)
-                        } else {
-                            Color32::from_rgb(26, 70, 100)
-                        });
-                    if ui.add(mode_btn).clicked() {
+                    let mode_label = if self.persistent_mode { "Persistent" } else { "One-shot" };
+                    if theme::toggle_button(ui, self.persistent_mode, mode_label).clicked() {
                         toggle_mode = true;
                     }
-                    ui.label("Mode:");
+                    ui.label(theme::caption("Mode"));
                     ui.add_space(8.0);
 
-                    let strip_all_btn =
-                        egui::Button::new("⚡ Strip All Protected").fill(Color32::from_rgb(160, 30, 30));
-                    if ui.add(strip_all_btn).clicked() {
+                    if theme::danger(ui, "Strip All Protected").clicked() {
                         do_strip_all = true;
                     }
                     ui.add_space(4.0);
@@ -2124,24 +2116,19 @@ impl eframe::App for App {
                 ui.add_space(12.0);
 
                 let auto_label = if self.auto_inject_enabled {
-                    "🤖 Auto-inject ON"
+                    "Auto-inject ON"
                 } else {
-                    "🤖 Auto-inject OFF"
+                    "Auto-inject OFF"
                 };
-                let auto_btn = egui::Button::new(auto_label).fill(if self.auto_inject_enabled {
-                    Color32::from_rgb(20, 80, 140)
-                } else {
-                    Color32::from_rgb(50, 50, 50)
-                });
-                if ui.add(auto_btn).clicked() {
+                if theme::toggle_button(ui, self.auto_inject_enabled, auto_label).clicked() {
                     toggle_auto = true;
                 }
 
                 ui.add_space(12.0);
                 if n_prot > 0 {
-                    ui.label(RichText::new(format!("🔴 {} protected", n_prot)).color(Color32::from_rgb(255, 80, 80)).strong());
+                    ui.label(RichText::new(format!("● {} protected", n_prot)).monospace().color(theme::DANGER).strong());
                 } else {
-                    ui.label(RichText::new("🟢 0 protected").color(Color32::from_rgb(100, 200, 100)).weak());
+                    ui.label(RichText::new("● 0 protected").monospace().color(theme::SUCCESS));
                 }
             });
 
@@ -2153,15 +2140,18 @@ impl eframe::App for App {
                         .desired_width(150.0)
                         .hint_text("process.exe"),
                 );
-                if ui.small_button("➕ Add").clicked() {
+                if ui.small_button("+ Add").clicked() {
                     add_watch = true;
                 }
                 ui.add_space(8.0);
                 let names: Vec<(usize, String)> = self.watch_names.iter().cloned().enumerate().collect();
                 for (i, name) in names {
                     let resp = ui.add(
-                        egui::Button::new(format!("👁 {name}  ✕"))
-                            .fill(Color32::from_rgb(40, 60, 80)),
+                        egui::Button::new(
+                            RichText::new(format!("{name}  ✕")).color(theme::ACCENT_2).monospace().size(11.5),
+                        )
+                        .fill(theme::accent_a(22))
+                        .stroke(egui::Stroke::new(1.0, theme::accent_a(70))),
                     );
                     if resp.clicked() {
                         remove_watch = Some(i);
@@ -2544,9 +2534,9 @@ impl eframe::App for App {
                             for entry in &self.log_entries {
                                 let elapsed = entry.time.elapsed().as_secs();
                                 let color = if entry.ok {
-                                    Color32::from_rgb(100, 220, 100)
+                                    theme::SUCCESS
                                 } else {
-                                    Color32::from_rgb(220, 90, 90)
+                                    theme::DANGER
                                 };
                                 ui.label(
                                     RichText::new(format!("[{elapsed}s ago]  {}", entry.msg))
@@ -2634,7 +2624,7 @@ impl eframe::App for App {
                             // Process name
                             row.col(|ui| {
                                 ui.colored_label(
-                                    Color32::from_rgb(130, 180, 255),
+                                    theme::PROCESS,
                                     truncate(&entry.process_name, 24),
                                 );
                             });
@@ -2643,7 +2633,7 @@ impl eframe::App for App {
                                 if entry.is_32bit {
                                     ui.label(
                                         RichText::new("32")
-                                            .color(Color32::from_rgb(255, 170, 68))
+                                            .color(theme::AMBER)
                                             .strong()
                                             .small(),
                                     );
@@ -2709,7 +2699,7 @@ impl eframe::App for App {
                     for (pid, name) in &self.reapply_alert {
                         ui.label(
                             RichText::new(format!("  • {name}  (PID {pid})"))
-                                .color(Color32::from_rgb(255, 100, 100))
+                                .color(theme::DANGER)
                                 .strong(),
                         );
                     }
@@ -2732,9 +2722,7 @@ impl eframe::App for App {
                     );
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        let btn = egui::Button::new("🔁  Switch to Persistent & Re-strip")
-                            .fill(Color32::from_rgb(30, 100, 50));
-                        if ui.add(btn).clicked() {
+                        if theme::primary(ui, "Switch to Persistent & Re-strip").clicked() {
                             switch_and_restrip = true;
                         }
                         ui.add_space(8.0);
@@ -2797,7 +2785,7 @@ fn render_help_body(ui: &mut egui::Ui, body: &str) {
             ui.label(
                 RichText::new(line)
                     .font(egui::FontId::monospace(12.5))
-                    .color(Color32::from_rgb(150, 220, 130)),
+                    .color(theme::SUCCESS),
             );
         } else {
             ui.label(line);
@@ -2824,14 +2812,7 @@ fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize)
                 ui.add_space(2.0);
                 for (i, (title, _)) in HELP_SECTIONS.iter().enumerate() {
                     let selected = *section == i;
-                    let btn = egui::Button::new(*title)
-                        .fill(if selected {
-                            Color32::from_rgb(40, 80, 130)
-                        } else {
-                            Color32::from_rgb(35, 35, 35)
-                        });
-                    if ui
-                        .add(btn)
+                    if theme::toggle_button(ui, selected, *title)
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
@@ -2860,7 +2841,7 @@ fn render_help_window(ctx: &egui::Context, show: &mut bool, section: &mut usize)
                                 RichText::new(*heading)
                                     .size(13.5)
                                     .strong()
-                                    .color(Color32::from_rgb(140, 190, 255)),
+                                    .color(theme::PROCESS),
                             );
                             ui.add_space(6.0);
                             render_help_body(ui, body);
@@ -2927,57 +2908,25 @@ fn render_settings_window(
             ui.add_space(4.0);
 
             // Startup
-            ui.label(RichText::new("Startup").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.label(RichText::new("Startup").strong().color(theme::ACCENT));
             ui.separator();
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let startup_label = if startup_enabled {
-                    "🚀  Start with Windows  (ON)"
-                } else {
-                    "🚀  Start with Windows  (OFF)"
-                };
-                let btn = egui::Button::new(startup_label)
-                    .fill(if startup_enabled {
-                        Color32::from_rgb(50, 90, 25)
-                    } else {
-                        Color32::from_rgb(50, 50, 50)
-                    })
-                    .min_size([300.0, 28.0].into());
-                if ui.add(btn)
-                    .on_hover_text(
-                        "Adds capture-bypass to HKCU\\Run so it launches on login.\n\
-                         Windows will show a UAC prompt each time because the app\n\
-                         requires Administrator rights.",
-                    )
-                    .clicked()
-                {
-                    *toggle_startup = true;
-                }
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let label = if silent_startup { "🤫  Silent startup  (ON)" } else { "🤫  Silent startup  (OFF)" };
-                let btn = egui::Button::new(label)
-                    .fill(if silent_startup { Color32::from_rgb(50, 60, 90) } else { Color32::from_rgb(50, 50, 50) })
-                    .min_size([300.0, 28.0].into());
-                if ui.add(btn).on_hover_text("Start minimized to tray without showing the window.").clicked() {
-                    *toggle_silent_startup = true;
-                }
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let label = if strip_on_launch { "🚀  Strip all on launch  (ON)" } else { "🚀  Strip all on launch  (OFF)" };
-                let btn = egui::Button::new(label)
-                    .fill(if strip_on_launch { Color32::from_rgb(80, 50, 20) } else { Color32::from_rgb(50, 50, 50) })
-                    .min_size([300.0, 28.0].into());
-                if ui.add(btn).on_hover_text("Automatically strip all protected windows on startup.").clicked() {
-                    *toggle_strip_on_launch = true;
-                }
-            });
+            if theme::setting_row(ui, startup_enabled, "Start with Windows",
+                "Launch at login (UAC prompt each time — needs admin).") {
+                *toggle_startup = true;
+            }
+            if theme::setting_row(ui, silent_startup, "Silent startup",
+                "Start minimized straight to the system tray.") {
+                *toggle_silent_startup = true;
+            }
+            if theme::setting_row(ui, strip_on_launch, "Strip all on launch",
+                "Clear every protected window on the first scan.") {
+                *toggle_strip_on_launch = true;
+            }
             ui.add_space(12.0);
 
             // Windows Defender
-            ui.label(RichText::new("Windows Defender").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.label(RichText::new("Windows Defender").strong().color(theme::ACCENT));
             ui.separator();
             ui.add_space(4.0);
             ui.label(
@@ -3007,54 +2956,24 @@ fn render_settings_window(
             ui.add_space(12.0);
 
             // Notifications
-            ui.label(RichText::new("Notifications").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.label(RichText::new("Notifications").strong().color(theme::ACCENT));
             ui.separator();
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let toast_label = if toast_enabled {
-                    "🔔  Toast notifications  (ON)"
-                } else {
-                    "🔕  Toast notifications  (OFF)"
-                };
-                let btn = egui::Button::new(toast_label)
-                    .fill(if toast_enabled {
-                        Color32::from_rgb(70, 60, 10)
-                    } else {
-                        Color32::from_rgb(50, 50, 50)
-                    })
-                    .min_size([300.0, 28.0].into());
-                if ui.add(btn)
-                    .on_hover_text(
-                        "Show a Windows desktop notification whenever auto-inject\n\
-                         silently strips a process in the background.",
-                    )
-                    .clicked()
-                {
-                    *toggle_toast = true;
-                }
-            });
+            if theme::setting_row(ui, toast_enabled, "Desktop notifications",
+                "Toast when auto-inject strips a process in the background.") {
+                *toggle_toast = true;
+            }
             ui.add_space(12.0);
 
             // Hotkey
-            ui.label(RichText::new("Hotkey").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.label(RichText::new("Hotkey").strong().color(theme::ACCENT));
             ui.separator();
             ui.add_space(4.0);
 
             let combo = hotkey_display(hotkey_mods, hotkey_key);
             ui.horizontal(|ui| {
-                let hk_label = if hotkey_enabled {
-                    format!("⌨  {}  (ON)", combo)
-                } else {
-                    format!("⌨  {}  (OFF)", combo)
-                };
-                let btn = egui::Button::new(hk_label)
-                    .fill(if hotkey_enabled {
-                        Color32::from_rgb(35, 35, 90)
-                    } else {
-                        Color32::from_rgb(50, 50, 50)
-                    })
-                    .min_size([220.0, 28.0].into());
-                if ui.add(btn)
+                let hk_label = format!("{}  {}", combo, if hotkey_enabled { "(ON)" } else { "(OFF)" });
+                if theme::toggle_button(ui, hotkey_enabled, &hk_label)
                     .on_hover_text("Toggle the global hotkey on or off")
                     .clicked()
                 {
@@ -3063,14 +2982,10 @@ fn render_settings_window(
 
                 // Change-hotkey button / recording indicator
                 if hotkey_recording {
-                    ui.add(egui::Button::new("⏺ Listening…")
-                        .fill(Color32::from_rgb(90, 20, 20))
-                        .min_size([0.0, 28.0].into()))
+                    theme::danger(ui, "● Listening…")
                         .on_hover_text("Press a key combo (Ctrl/Shift/Alt + key). Esc to cancel.");
                 } else {
-                    if ui.add(egui::Button::new("Change…")
-                            .fill(Color32::from_rgb(50, 50, 70))
-                            .min_size([0.0, 28.0].into()))
+                    if theme::ghost(ui, "Change…")
                         .on_hover_text("Click then press a new key combination")
                         .clicked()
                     {
@@ -3083,77 +2998,35 @@ fn render_settings_window(
             // Description
             let desc = if hotkey_recording {
                 RichText::new("  Press any key with Ctrl, Shift, or Alt held. Esc to cancel.")
-                    .size(10.5).color(Color32::from_rgb(200, 120, 120))
+                    .size(10.5).color(theme::DANGER)
             } else {
                 RichText::new(format!(
                     "  {} → Strip All Protected windows, even when minimised to tray.",
                     combo
                 ))
-                .size(10.5).color(Color32::from_rgb(110, 110, 150))
+                .size(10.5).color(theme::TEXT_DIM)
             };
             ui.label(desc);
             ui.add_space(12.0);
 
             // Window
-            ui.label(RichText::new("Window").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.label(RichText::new("Window").strong().color(theme::ACCENT));
             ui.separator();
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let tray_label = if minimize_to_tray {
-                    "🗕  Minimize to tray on close  (ON)"
-                } else {
-                    "🗕  Minimize to tray on close  (OFF)"
-                };
-                let btn = egui::Button::new(tray_label)
-                    .fill(if minimize_to_tray {
-                        Color32::from_rgb(40, 60, 80)
-                    } else {
-                        Color32::from_rgb(50, 50, 50)
-                    })
-                    .min_size([300.0, 28.0].into());
-                if ui
-                    .add(btn)
-                    .on_hover_text(
-                        "ON  — clicking ✕ hides the app to the system tray.\n\
-                         OFF — clicking ✕ exits the app completely.\n\
-                         The tray icon's Quit option always exits regardless.",
-                    )
-                    .clicked()
-                {
-                    *toggle_minimize_to_tray = true;
-                }
-            });
+            if theme::setting_row(ui, minimize_to_tray, "Minimize to tray on close",
+                "✕ hides to the tray instead of quitting (tray Quit still exits).") {
+                *toggle_minimize_to_tray = true;
+            }
             ui.add_space(12.0);
 
             // Logging
-            ui.label(RichText::new("Logging").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.label(RichText::new("Logging").strong().color(theme::ACCENT));
             ui.separator();
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let log_label = if logging_enabled {
-                    "📋  Injection log file  (ON)"
-                } else {
-                    "📋  Injection log file  (OFF)"
-                };
-                let btn = egui::Button::new(log_label)
-                    .fill(if logging_enabled {
-                        Color32::from_rgb(30, 70, 50)
-                    } else {
-                        Color32::from_rgb(50, 50, 50)
-                    })
-                    .min_size([300.0, 28.0].into());
-                if ui
-                    .add(btn)
-                    .on_hover_text(
-                        "Append a timestamped entry to injection.log each time\n\
-                         a process is stripped, including mode and result.\n\
-                         Log is stored in %APPDATA%\\capture-bypass\\injection.log",
-                    )
-                    .clicked()
-                {
-                    *toggle_logging = true;
-                }
-            });
+            if theme::setting_row(ui, logging_enabled, "Injection log file",
+                "Append a timestamped entry to injection.log on every strip.") {
+                *toggle_logging = true;
+            }
             if logging_enabled {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -3170,65 +3043,33 @@ fn render_settings_window(
                 ui.label(
                     RichText::new("  %APPDATA%\\capture-bypass\\injection.log")
                         .size(10.5)
-                        .color(Color32::from_rgb(110, 110, 150)),
+                        .color(theme::TEXT_DIM),
                 );
             }
             ui.add_space(8.0);
 
             // Discord Rich Presence
-            ui.label(RichText::new("Discord").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.label(RichText::new("Discord").strong().color(theme::ACCENT));
             ui.separator();
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let rpc_label = if discord_rpc_enabled {
-                    "🎮  Discord Rich Presence  (ON)"
-                } else {
-                    "🎮  Discord Rich Presence  (OFF)"
-                };
-                let btn = egui::Button::new(rpc_label)
-                    .fill(if discord_rpc_enabled {
-                        Color32::from_rgb(30, 45, 90)   // Discord blurple-ish
-                    } else {
-                        Color32::from_rgb(50, 50, 50)
-                    })
-                    .min_size([300.0, 28.0].into());
-                if ui
-                    .add(btn)
-                    .on_hover_text(
-                        "Show capture-bypass status in Discord.\n\
-                         Displays mode, auto-inject state, and strips\n\
-                         this session. Requires Discord to be running.",
-                    )
-                    .clicked()
-                {
-                    *toggle_discord_rpc = true;
-                }
-            });
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new("  Shows mode, auto-inject state, and strip count in Discord.")
-                    .size(10.5)
-                    .color(Color32::from_rgb(110, 110, 150)),
-            );
+            if theme::setting_row(ui, discord_rpc_enabled, "Discord Rich Presence",
+                "Show mode, auto-inject state, and strip count in Discord.") {
+                *toggle_discord_rpc = true;
+            }
             ui.add_space(8.0);
 
             // Detection
-            ui.label(RichText::new("Detection").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.label(RichText::new("Detection").strong().color(theme::ACCENT));
             ui.separator();
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let label = if fast_scan { "⚡  Fast scan — 100ms  (ON)" } else { "⚡  Fast scan — 100ms  (OFF)" };
-                let btn = egui::Button::new(label)
-                    .fill(if fast_scan { Color32::from_rgb(80, 70, 10) } else { Color32::from_rgb(50, 50, 50) })
-                    .min_size([300.0, 28.0].into());
-                if ui.add(btn).on_hover_text("Scan every 100ms instead of 500ms. Uses more CPU.").clicked() {
-                    *toggle_fast_scan = true;
-                }
-            });
+            if theme::setting_row(ui, fast_scan, "Fast scan — 100 ms",
+                "Scan every 100 ms instead of 500 ms (slightly more CPU).") {
+                *toggle_fast_scan = true;
+            }
             ui.add_space(12.0);
 
             // Per-process Rules
-            ui.label(RichText::new("Per-process Rules").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.label(RichText::new("Per-process Rules").strong().color(theme::ACCENT));
             ui.separator();
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -3271,7 +3112,7 @@ fn render_settings_window(
             ui.add_space(12.0);
 
             // Exclusions
-            ui.label(RichText::new("Exclusions").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.label(RichText::new("Exclusions").strong().color(theme::ACCENT));
             ui.separator();
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -3295,7 +3136,7 @@ fn render_settings_window(
             ui.add_space(12.0);
 
             // Config export/import
-            ui.label(RichText::new("Config").strong().color(Color32::from_rgb(180, 180, 220)));
+            ui.label(RichText::new("Config").strong().color(theme::ACCENT));
             ui.separator();
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -3317,16 +3158,16 @@ fn render_settings_window(
 fn render_status_badge(ui: &mut Ui, affinity: u32) {
     match affinity {
         WDA_EXCLUDEFROMCAPTURE => {
-            ui.label(RichText::new("● PROTECTED").color(Color32::from_rgb(255, 80, 80)).strong());
+            ui.label(RichText::new("● PROTECTED").monospace().size(11.0).color(theme::DANGER).strong());
         }
         WDA_MONITOR => {
-            ui.label(RichText::new("● MONITOR").color(Color32::from_rgb(255, 170, 68)).strong());
+            ui.label(RichText::new("● MONITOR").monospace().size(11.0).color(theme::AMBER).strong());
         }
         WDA_NONE => {
-            ui.label(RichText::new("● OK").color(Color32::from_rgb(100, 220, 100)).strong());
+            ui.label(RichText::new("● CLEAR").monospace().size(11.0).color(theme::SUCCESS).strong());
         }
         _ => {
-            ui.label(RichText::new("● ?").color(Color32::GRAY));
+            ui.label(RichText::new("● ?").monospace().size(11.0).color(theme::TEXT_FAINT));
         }
     }
 }

@@ -1,0 +1,8 @@
+[package]
+name    = "reflective_dll"
+version = "0.1.0"
+edition = "2021"
+
+# This crate is linked into no_std cdylib crates.  It must not depend on std.
+[dependencies]
+reflective_dll_macro = { path = "../reflective_dll_macro" }

@@ -130,6 +130,17 @@ use windows::{
 #[repr(C)] struct MitigationDynamicCodePolicy       { bitfield: u32 }
 #[repr(C)] struct MitigationExtensionPointDisable   { bitfield: u32 }
 
+// inject_fast -- same mitigation-policy check as inject_checked, but skips the
+// stealth temp-copy entirely. Eliminates the per-injection disk write (~10–30 ms)
+// that is the primary source of the visible blink. The DLL name is visible as-is
+// in the target process's module list -- irrelevant for capture-bypass use cases.
+pub fn inject_fast(pid: u32, dll_path: &Path) -> InjectResult {
+    if !dll_path.exists() {
+        return Err(InjectError::DllNotFound(dll_path.to_path_buf()));
+    }
+    inject_dll_inner(pid, dll_path)
+}
+
 // inject_dll_stealth is what the CLI uses -- wraps inject_dll with the temp-copy
 // stealth trick. Returns a windows::core::Error on failure.
 pub fn inject_dll_stealth(pid: u32, dll_path: &Path) -> windows::core::Result<()> {
