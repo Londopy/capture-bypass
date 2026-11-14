@@ -22,7 +22,11 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin,
     Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2,
 };
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use windows::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_FONTS, SHGFP_TYPE_CURRENT};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Palette
@@ -157,7 +161,47 @@ fn install_fonts(ctx: &egui::Context) {
         .or_default()
         .insert(0, "plex_sans".to_owned());
 
+    if let Some(font) = system_fonts_dir().and_then(|dir| load_chinese_font(&dir)) {
+        let name = "system_chinese";
+        fonts.font_data.insert(name.to_owned(), Arc::new(font));
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push(name.to_owned());
+        }
+    }
     ctx.set_fonts(fonts);
+}
+
+fn system_fonts_dir() -> Option<PathBuf> {
+    let mut path = [0u16; 260];
+    unsafe {
+        SHGetFolderPathW(
+            None,
+            CSIDL_FONTS as i32,
+            None,
+            SHGFP_TYPE_CURRENT.0 as u32,
+            &mut path,
+        )
+    }
+    .ok()?;
+    let len = path.iter().position(|&unit| unit == 0)?;
+    Some(PathBuf::from(OsString::from_wide(&path[..len])))
+}
+
+fn load_chinese_font(dir: &Path) -> Option<FontData> {
+    use ab_glyph::Font as _;
+
+    ["msyh.ttc", "Deng.ttf", "Simhei.ttf"]
+        .into_iter()
+        .find_map(|file| {
+            let data = FontData::from_owned(std::fs::read(dir.join(file)).ok()?);
+            // Face zero is the regular face of the Microsoft YaHei collection.
+            let face = ab_glyph::FontRef::try_from_slice_and_index(&data.font, data.index).ok()?;
+            (face.units_per_em().is_some() && face.glyph_id('中').0 != 0).then_some(data)
+        })
 }
 
 fn build_visuals() -> egui::Visuals {

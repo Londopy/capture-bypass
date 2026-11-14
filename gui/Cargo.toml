@@ -8,6 +8,7 @@ name = "capture_bypass_gui"
 path = "src/main.rs"
 
 [dependencies]
+ab_glyph      = "0.2"
 eframe        = { version = "0.31", default-features = true }
 egui_extras   = { version = "0.31" }
 injector_core = { path = "../core" }
